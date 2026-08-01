@@ -8,7 +8,8 @@ import { getDraft, listProjects, putDraft, putProject, removeProject, type Proje
 type Preset = { name: string; accent: string; code: string };
 type LegacyProject = { id: string; name: string; code: string; updatedAt: string };
 type LegacyDraft = { projectName?: string; code?: string; activeProjectId?: string | null; saved?: boolean };
-type StudioPreferences = { chatOpen?: boolean; autoRun?: boolean; editorOpen?: boolean };
+type StudioPreferences = { chatOpen?: boolean; autoRun?: boolean; editorOpen?: boolean; openPaths?: string[] };
+type ProjectBrowserRow = { path: string; name: string; depth: number; kind: "folder" | "file"; file?: ProjectFile };
 type FileAction = { type: "write" | "delete" | "move"; path: string; to?: string; content?: string; mimeType?: string };
 type ChatMessage = {
   id: string;
@@ -219,6 +220,23 @@ const mainFile = (content: string): ProjectFile => ({ path: "main.js", kind: "te
 const isEditable = (file: ProjectFile) => file.kind === "text";
 const normalizedProjectPath = (value: string) => value.trim().replace(/\\/g, "/").replace(/^\.\//, "");
 
+const buildProjectBrowserRows = (files: ProjectFile[], collapsedFolders: Set<string>): ProjectBrowserRow[] => {
+  const folders = new Set<string>();
+  for (const file of files) {
+    const parts = file.path.split("/");
+    for (let index = 1; index < parts.length; index += 1) folders.add(parts.slice(0, index).join("/"));
+  }
+  const rows: ProjectBrowserRow[] = [
+    ...[...folders].map((path) => ({ path, name: path.split("/").pop() || path, depth: path.split("/").length - 1, kind: "folder" as const })),
+    ...files.map((file) => ({ path: file.path, name: file.path.split("/").pop() || file.path, depth: file.path.split("/").length - 1, kind: "file" as const, file })),
+  ].sort((left, right) => left.path.localeCompare(right.path, undefined, { numeric: true }));
+
+  return rows.filter((row) => {
+    const parts = row.path.split("/");
+    return !parts.slice(0, -1).some((_part, index) => collapsedFolders.has(parts.slice(0, index + 1).join("/")));
+  });
+};
+
 const findCodeMatches = (source: string, query: string) => {
   if (!query) return [];
   const matches: number[] = [];
@@ -245,6 +263,8 @@ export default function Playground() {
   const [code, setCode] = useState(PRESETS[0].code);
   const [files, setFiles] = useState<ProjectFile[]>([mainFile(PRESETS[0].code)]);
   const [activePath, setActivePath] = useState("main.js");
+  const [openPaths, setOpenPaths] = useState<string[]>(["main.js"]);
+  const [collapsedFolders, setCollapsedFolders] = useState<Set<string>>(new Set());
   const [library, setLibrary] = useState<ProjectRecord[]>([]);
   const [libraryOpen, setLibraryOpen] = useState(false);
   const [codeSearchOpen, setCodeSearchOpen] = useState(false);
@@ -288,6 +308,8 @@ export default function Playground() {
 
   const lines = useMemo(() => code.split("\n").length, [code]);
   const projectFiles = useMemo(() => files.map((file) => file.path === activePath && file.kind === "text" ? { ...file, content: code } : file), [activePath, code, files]);
+  const projectBrowserRows = useMemo(() => buildProjectBrowserRows(projectFiles, collapsedFolders), [collapsedFolders, projectFiles]);
+  const openFiles = useMemo(() => openPaths.map((path) => projectFiles.find((file) => file.path === path && file.kind === "text")).filter((file): file is ProjectFile & { kind: "text" } => Boolean(file)), [openPaths, projectFiles]);
   const codeSearchMatches = useMemo(() => findCodeMatches(code, codeSearchQuery), [code, codeSearchQuery]);
   const activeCodeSearchIndex = codeSearchMatches.length ? codeSearchIndex % codeSearchMatches.length : 0;
 
@@ -412,6 +434,7 @@ export default function Playground() {
           if (!cancelled && restoredFile?.kind === "text") {
             setFiles(draft.files);
             setActivePath(restoredPath);
+            setOpenPaths([restoredPath]);
             setCode(restoredFile.content);
             setProjectName(draft.name || "Untitled sketch");
             setActiveProjectId(draft.projectId);
@@ -426,6 +449,10 @@ export default function Playground() {
           setChatOpen(preferences.chatOpen ?? false);
           setAutoRun(preferences.autoRun ?? false);
           setEditorOpen(preferences.editorOpen ?? true);
+          if (Array.isArray(preferences.openPaths)) {
+            const restoredOpenPaths = preferences.openPaths.filter((path) => sourceToRestore.some((file) => file.path === path && file.kind === "text"));
+            setOpenPaths(restoredOpenPaths.length ? restoredOpenPaths : [draft?.entry || "main.js"]);
+          }
         }
       } catch { /* fall back to the starter project */ }
       if (cancelled) return;
@@ -446,8 +473,8 @@ export default function Playground() {
 
   useEffect(() => {
     if (!preferencesReadyRef.current) return;
-    localStorage.setItem(STORAGE_PREFERENCES, JSON.stringify({ chatOpen, autoRun, editorOpen }));
-  }, [autoRun, chatOpen, editorOpen]);
+    localStorage.setItem(STORAGE_PREFERENCES, JSON.stringify({ chatOpen, autoRun, editorOpen, openPaths }));
+  }, [autoRun, chatOpen, editorOpen, openPaths]);
 
   const checkCodex = useCallback(async () => {
     setChatOnline(null);
@@ -535,6 +562,7 @@ export default function Playground() {
     setProjectName(project.name);
     setFiles(project.files);
     setActivePath(project.entry);
+    setOpenPaths([project.entry]);
     setCode(entryFile.content);
     setActiveProjectId(project.id);
     setSaved(true);
@@ -547,7 +575,52 @@ export default function Playground() {
     const file = nextFiles.find((candidate) => candidate.path === path);
     setFiles(nextFiles);
     setActivePath(path);
-    if (file?.kind === "text") setCode(file.content);
+    if (file?.kind === "text") {
+      setOpenPaths((current) => current.includes(path) ? current : [...current, path]);
+      setCode(file.content);
+    }
+  };
+
+  const closeFileTab = (path: string) => {
+    const nextOpenPaths = openPaths.filter((candidate) => candidate !== path);
+    if (path !== activePath) return setOpenPaths(nextOpenPaths);
+    const fallbackPath = nextOpenPaths.find((candidate) => projectFiles.some((file) => file.path === candidate && file.kind === "text"))
+      || projectFiles.find((file) => file.path === "main.js" && file.kind === "text")?.path
+      || projectFiles.find((file) => file.kind === "text")?.path;
+    if (!fallbackPath) return;
+    setOpenPaths(nextOpenPaths.includes(fallbackPath) ? nextOpenPaths : [...nextOpenPaths, fallbackPath]);
+    selectFile(fallbackPath);
+  };
+
+  const renameProjectFile = (path: string) => {
+    if (path === "main.js") return setError("main.js is the project entry and cannot be renamed");
+    const requested = window.prompt("Rename project file", path);
+    if (!requested) return;
+    const destination = normalizedProjectPath(requested);
+    if (!destination || destination.startsWith("/") || destination.split("/").includes("..")) return setError("Choose a relative project path");
+    if (projectFiles.some((file) => file.path === destination)) return setError("A project file already exists at that path");
+    const nextFiles = projectFiles.map((file) => file.path === path ? { ...file, path: destination } : file);
+    setFiles(nextFiles);
+    setOpenPaths((current) => current.map((candidate) => candidate === path ? destination : candidate));
+    if (activePath === path) setActivePath(destination);
+    setSaved(false);
+  };
+
+  const deleteProjectFile = (path: string) => {
+    if (path === "main.js") return setError("main.js is the project entry and cannot be deleted");
+    if (!window.confirm(`Delete ${path} from this project?`)) return;
+    const nextFiles = projectFiles.filter((file) => file.path !== path);
+    setFiles(nextFiles);
+    setOpenPaths((current) => current.filter((candidate) => candidate !== path));
+    if (activePath === path) {
+      const fallback = nextFiles.find((file) => file.path === "main.js" && file.kind === "text") || nextFiles.find((file) => file.kind === "text");
+      if (fallback?.kind === "text") {
+        setActivePath(fallback.path);
+        setOpenPaths((current) => current.includes(fallback.path) ? current : [...current, fallback.path]);
+        setCode(fallback.content);
+      }
+    }
+    setSaved(false);
   };
 
   const addTextFile = () => {
@@ -560,6 +633,7 @@ export default function Playground() {
     const file: ProjectFile = { path, kind: "text", mimeType, content: "" };
     setFiles([...projectFiles, file]);
     setActivePath(path);
+    setOpenPaths((current) => [...current, path]);
     setCode("");
     setSaved(false);
   };
@@ -609,6 +683,7 @@ export default function Playground() {
     setProjectName(preset.name);
     setFiles(nextFiles);
     setActivePath("main.js");
+    setOpenPaths(["main.js"]);
     setCode(preset.code);
     setActiveProjectId(null);
     setSaved(false);
@@ -636,7 +711,6 @@ export default function Playground() {
     URL.revokeObjectURL(url);
   };
 
-  const exportSource = () => download(`${safeName(projectName)}.js`, code, "text/javascript");
   const exportProject = async () => {
     const project: ProjectRecord = {
       id: activeProjectId ?? crypto.randomUUID(), name: projectName, entry: "main.js", runtimeId: "three", files: projectFiles, updatedAt: new Date().toISOString(),
@@ -674,6 +748,7 @@ export default function Playground() {
         setProjectName(file.name.replace(/\.js$/i, ""));
         setFiles(nextFiles);
         setActivePath("main.js");
+        setOpenPaths(["main.js"]);
         setCode(text);
         setActiveProjectId(null);
         setSaved(false);
@@ -894,7 +969,6 @@ export default function Playground() {
         <div className="top-actions">
           <span className={`save-state ${saved ? "saved" : ""}`}><i />{saved ? "Saved in library" : "Unsaved changes"}</span>
           <button className="text-button" onClick={() => importRef.current?.click()}>Import</button>
-          <button className="text-button" onClick={exportSource}>Export .js</button>
           <button className="text-button" onClick={() => void exportProject()}>Export .jslife</button>
           <button className="save-button" onClick={() => void saveProject()}>Save</button>
           <button className="ai-button" onClick={() => setChatOpen((open) => !open)}><Icon>✦</Icon> Codex</button>
@@ -919,51 +993,82 @@ export default function Playground() {
         </aside>
 
         <section className="editor-panel" aria-label="JavaScript module editor">
-          <div className="panel-heading"><span>PROJECT FILES</span><div><button className="asset-add" onClick={() => assetRef.current?.click()} title="Add assets">＋ asset</button><span className="module-api">{projectFiles.filter((file) => file.kind === "asset").length} assets</span><button className="editor-code-search" onClick={openCodeSearch} title="Find in code (⌘F)" aria-label="Find in code">⌕ <kbd>⌘F</kbd></button></div></div>
-          <div className="tabs">{projectFiles.filter(isEditable).map((file) => <button key={file.path} className={file.path === activePath ? "tab-active" : "file-tab"} onClick={() => selectFile(file.path)} title={file.path}><i style={{ background: PRESETS[presetIndex].accent }} />{file.path.split("/").pop()} <span>{file.path === activePath && !saved ? "●" : "×"}</span></button>)}<button className="add-tab" onClick={addTextFile} aria-label="New file">＋</button></div>
-          {codeSearchOpen && <div className="code-search" role="search">
-            <span aria-hidden="true">⌕</span>
-            <input
-              ref={codeSearchRef}
-              value={codeSearchQuery}
-              onChange={(event) => { setCodeSearchQuery(event.target.value); setCodeSearchIndex(0); }}
-              onKeyDown={(event) => {
-                if (event.key === "Escape") { event.preventDefault(); closeCodeSearch(); }
-                if (event.key === "Enter") { event.preventDefault(); stepCodeSearch(event.shiftKey ? -1 : 1); }
-              }}
-              placeholder={`Find in ${activePath}`}
-              aria-label="Find in code"
-              autoComplete="off"
-            />
-            <span className="code-search-count">{codeSearchQuery ? (codeSearchMatches.length ? `${activeCodeSearchIndex + 1}/${codeSearchMatches.length}` : "0/0") : ""}</span>
-            <button onClick={() => stepCodeSearch(-1)} disabled={!codeSearchMatches.length} aria-label="Previous match">↑</button>
-            <button onClick={() => stepCodeSearch(1)} disabled={!codeSearchMatches.length} aria-label="Next match">↓</button>
-            <button onClick={closeCodeSearch} aria-label="Close search">×</button>
-          </div>}
-          <div className="editor-wrap">
-            <pre className="line-numbers" aria-hidden="true">{Array.from({ length: lines }, (_, i) => i + 1).join("\n")}</pre>
-            <textarea
-              ref={editorRef}
-              value={code}
-              onChange={(event) => { setCode(event.target.value); setSaved(false); }}
-              onKeyDown={(event) => {
-                if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "f") { event.preventDefault(); openCodeSearch(); }
-                if ((event.metaKey || event.ctrlKey) && event.key === "Enter") { event.preventDefault(); runCode(); }
-                if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "s") { event.preventDefault(); saveProject(); }
-                if (event.key === "Tab") {
-                  event.preventDefault();
-                  const target = event.currentTarget;
-                  const next = `${code.slice(0, target.selectionStart)}  ${code.slice(target.selectionEnd)}`;
-                  const caret = target.selectionStart + 2;
-                  setCode(next); setSaved(false);
-                  requestAnimationFrame(() => target.setSelectionRange(caret, caret));
-                }
-              }}
-              spellCheck={false}
-              aria-label={`${activePath} source code`}
-            />
+          <div className="panel-heading"><span>EDITOR</span><div><button className="asset-add" onClick={addTextFile} title="New text file">＋ file</button><button className="asset-add" onClick={() => assetRef.current?.click()} title="Add assets">＋ asset</button><button className="editor-code-search" onClick={openCodeSearch} title="Find in code (⌘F)" aria-label="Find in code">⌕ <kbd>⌘F</kbd></button></div></div>
+          <div className="editor-body">
+            <aside className="file-browser" aria-label="Project file browser">
+              <div className="file-browser-title"><span>JSLIFE</span><small>{projectFiles.length}</small></div>
+              <div className="file-tree">
+                {projectBrowserRows.map((row) => row.kind === "folder" ? (
+                  <button
+                    key={`folder:${row.path}`}
+                    className="file-tree-folder"
+                    style={{ paddingLeft: 9 + row.depth * 12 }}
+                    onClick={() => setCollapsedFolders((current) => {
+                      const next = new Set(current);
+                      if (next.has(row.path)) next.delete(row.path); else next.add(row.path);
+                      return next;
+                    })}
+                    title={row.path}
+                  ><span>{collapsedFolders.has(row.path) ? "▸" : "▾"}</span>{row.name}</button>
+                ) : (
+                  <div key={`file:${row.path}`} className={`file-tree-row${row.path === activePath ? " file-tree-active" : ""}`} style={{ paddingLeft: 21 + row.depth * 12 }} title={row.path}>
+                    <button className="file-tree-open" onClick={() => row.file?.kind === "text" && selectFile(row.path)} disabled={row.file?.kind !== "text"}>
+                      <span className={`file-kind file-kind-${row.file?.kind}`}>{row.file?.kind === "asset" ? "◇" : row.path.match(/\.(glsl|frag|vert)$/i) ? "◈" : "JS"}</span>
+                      <span>{row.name}</span>
+                    </button>
+                    {row.path !== "main.js" && <span className="file-tree-actions"><button onClick={() => renameProjectFile(row.path)} aria-label={`Rename ${row.path}`} title="Rename">✎</button><button onClick={() => deleteProjectFile(row.path)} aria-label={`Delete ${row.path}`} title="Delete">×</button></span>}
+                  </div>
+                ))}
+              </div>
+              <div className="file-browser-summary">{projectFiles.filter(isEditable).length} text · {projectFiles.filter((file) => file.kind === "asset").length} assets</div>
+            </aside>
+            <div className="code-workspace">
+              <div className="tabs">{openFiles.map((file) => <div key={file.path} className={file.path === activePath ? "tab-active" : "file-tab"}><button className="tab-label" onClick={() => selectFile(file.path)} title={file.path}><i style={{ background: PRESETS[presetIndex].accent }} /><span>{file.path.split("/").pop()}</span>{file.path === activePath && !saved && <b>●</b>}</button><button className="tab-close" onClick={() => closeFileTab(file.path)} aria-label={`Close ${file.path}`} title="Close tab">×</button></div>)}<button className="add-tab" onClick={addTextFile} aria-label="New file">＋</button></div>
+              {codeSearchOpen && <div className="code-search" role="search">
+                <span aria-hidden="true">⌕</span>
+                <input
+                  ref={codeSearchRef}
+                  value={codeSearchQuery}
+                  onChange={(event) => { setCodeSearchQuery(event.target.value); setCodeSearchIndex(0); }}
+                  onKeyDown={(event) => {
+                    if (event.key === "Escape") { event.preventDefault(); closeCodeSearch(); }
+                    if (event.key === "Enter") { event.preventDefault(); stepCodeSearch(event.shiftKey ? -1 : 1); }
+                  }}
+                  placeholder={`Find in ${activePath}`}
+                  aria-label="Find in code"
+                  autoComplete="off"
+                />
+                <span className="code-search-count">{codeSearchQuery ? (codeSearchMatches.length ? `${activeCodeSearchIndex + 1}/${codeSearchMatches.length}` : "0/0") : ""}</span>
+                <button onClick={() => stepCodeSearch(-1)} disabled={!codeSearchMatches.length} aria-label="Previous match">↑</button>
+                <button onClick={() => stepCodeSearch(1)} disabled={!codeSearchMatches.length} aria-label="Next match">↓</button>
+                <button onClick={closeCodeSearch} aria-label="Close search">×</button>
+              </div>}
+              <div className="editor-wrap">
+                <pre className="line-numbers" aria-hidden="true">{Array.from({ length: lines }, (_, i) => i + 1).join("\n")}</pre>
+                <textarea
+                  ref={editorRef}
+                  value={code}
+                  onChange={(event) => { setCode(event.target.value); setSaved(false); }}
+                  onKeyDown={(event) => {
+                    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "f") { event.preventDefault(); openCodeSearch(); }
+                    if ((event.metaKey || event.ctrlKey) && event.key === "Enter") { event.preventDefault(); runCode(); }
+                    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "s") { event.preventDefault(); saveProject(); }
+                    if (event.key === "Tab") {
+                      event.preventDefault();
+                      const target = event.currentTarget;
+                      const next = `${code.slice(0, target.selectionStart)}  ${code.slice(target.selectionEnd)}`;
+                      const caret = target.selectionStart + 2;
+                      setCode(next); setSaved(false);
+                      requestAnimationFrame(() => target.setSelectionRange(caret, caret));
+                    }
+                  }}
+                  spellCheck={false}
+                  aria-label={`${activePath} source code`}
+                />
+              </div>
+              <div className="editor-status"><span>{activePath}</span><span>{lines} lines</span><span>UTF-8</span><span className="context-ready">● {projectFiles.length} files ready</span></div>
+            </div>
           </div>
-          <div className="editor-status"><span>{activePath}</span><span>{lines} lines</span><span>UTF-8</span><span className="context-ready">● {projectFiles.length} files ready</span></div>
         </section>
 
         <section className="preview-panel">
