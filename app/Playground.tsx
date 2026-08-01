@@ -1,34 +1,23 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import * as THREE from "three";
-import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
-import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
-import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
+import { packProject, unpackProject } from "./jslife-package";
+import { compileProject, disposeScene, type GraphicsRuntime, type PointerState, type ResizeArgs } from "./project-runtime";
+import { getDraft, listProjects, putDraft, putProject, removeProject, type ProjectFile, type ProjectRecord } from "./project-store";
 
-type PointerState = { x: number; y: number; px: number; py: number; down: boolean };
-type FrameArgs = { time: number; delta: number; frame: number; pointer: PointerState };
-type ResizeArgs = { width: number; height: number; pixelRatio: number };
-type GraphicsRuntime = {
-  frame?: (args: FrameArgs) => void;
-  resize?: (args: ResizeArgs) => void;
-  dispose?: () => void;
-  renderer?: THREE.WebGLRenderer;
-  scene?: THREE.Scene;
-};
 type Preset = { name: string; accent: string; code: string };
-type SavedProject = { id: string; name: string; code: string; updatedAt: string };
-type FileSearchItem = { id: string; name: string; code: string; updatedAt?: string; current?: boolean };
-type DraftProject = { projectName?: string; code?: string; activeProjectId?: string | null; saved?: boolean };
-type StudioPreferences = { chatOpen?: boolean; autoRun?: boolean };
+type LegacyProject = { id: string; name: string; code: string; updatedAt: string };
+type LegacyDraft = { projectName?: string; code?: string; activeProjectId?: string | null; saved?: boolean };
+type StudioPreferences = { chatOpen?: boolean; autoRun?: boolean; editorOpen?: boolean };
+type FileAction = { type: "write" | "delete" | "move"; path: string; to?: string; content?: string; mimeType?: string };
 type ChatMessage = {
   id: string;
   role: "user" | "assistant";
   text: string;
-  code?: string;
+  changes?: FileAction[];
   autoApplied?: boolean;
 };
-type CodexResult = { message: string; action: "none" | "replace"; code: string };
+type CodexResult = { message: string; action: "none" | "changes"; changes: FileAction[] };
 
 const STORAGE_LIBRARY = "jslife-library-v1";
 const STORAGE_DRAFT = "jslife-three-draft-v1";
@@ -36,12 +25,6 @@ const STORAGE_CHAT = "jslife-codex-chat-v1";
 const STORAGE_THREAD = "jslife-codex-thread-v1";
 const STORAGE_PREFERENCES = "jslife-preferences-v1";
 const CODEX_BRIDGE = "http://127.0.0.1:4317";
-
-const THREE_ADDONS: Record<string, Record<string, unknown>> = {
-  "three/addons/postprocessing/EffectComposer.js": { EffectComposer },
-  "three/addons/postprocessing/RenderPass.js": { RenderPass },
-  "three/addons/postprocessing/UnrealBloomPass.js": { UnrealBloomPass },
-};
 
 const PRESETS: Preset[] = [
   {
@@ -231,54 +214,25 @@ export function dispose() {
   },
 ];
 
-const compileModule = (source: string, mount: HTMLDivElement, viewport: ResizeArgs): GraphicsRuntime => {
-  const threeImport = /import\s+\*\s+as\s+THREE\s+from\s+["']three["'];?/g;
-  let executable = source.replace(threeImport, "");
-  const addonImport = /import\s*\{([^}]+)\}\s*from\s*["'](three\/addons\/[^"']+)["'];?/g;
-  executable = executable.replace(addonImport, (_statement, bindings: string, modulePath: string) => {
-    const addonModule = THREE_ADDONS[modulePath];
-    if (!addonModule) throw new Error(`Unsupported Three.js addon import: ${modulePath}`);
-    return bindings.split(",").map((binding) => {
-      const [imported, local = imported] = binding.trim().split(/\s+as\s+/);
-      if (!/^[A-Za-z_$][\w$]*$/.test(imported) || !/^[A-Za-z_$][\w$]*$/.test(local) || !(imported in addonModule)) {
-        throw new Error(`Unsupported export ${binding.trim()} from ${modulePath}`);
-      }
-      return `const ${local} = THREE_ADDONS[${JSON.stringify(modulePath)}][${JSON.stringify(imported)}];`;
-    }).join("\n");
-  });
-  if (/\bimport\s/.test(executable)) {
-    throw new Error("Unsupported import. Use Three.js or a supported Three.js addon.");
-  }
-  executable = executable
-    .replace(/export\s+(async\s+)?function\s+/g, "$1function ")
-    .replace(/export\s+(const|let|var|class)\s+/g, "$1 ")
-    .replace(/export\s*\{[^}]*\};?/g, "");
-
-  const factory = new Function(
-    "THREE",
-    "THREE_ADDONS",
-    "mount",
-    "viewport",
-    `"use strict";\n${executable}\nreturn {\n` +
-      `frame: typeof frame === "function" ? frame : undefined,\n` +
-      `resize: typeof resize === "function" ? resize : undefined,\n` +
-      `dispose: typeof dispose === "function" ? dispose : undefined,\n` +
-      `renderer: typeof renderer !== "undefined" ? renderer : undefined,\n` +
-      `scene: typeof scene !== "undefined" ? scene : undefined\n};`,
-  );
-  return factory(THREE, THREE_ADDONS, mount, viewport) as GraphicsRuntime;
-};
-
-const disposeScene = (scene?: THREE.Scene) => {
-  scene?.traverse((object) => {
-    const mesh = object as THREE.Mesh;
-    mesh.geometry?.dispose?.();
-    const materials = Array.isArray(mesh.material) ? mesh.material : mesh.material ? [mesh.material] : [];
-    materials.forEach((material) => material.dispose());
-  });
-};
-
 const safeName = (value: string) => value.trim().replace(/[^a-z0-9-_]+/gi, "-").replace(/^-|-$/g, "") || "sketch";
+const mainFile = (content: string): ProjectFile => ({ path: "main.js", kind: "text", mimeType: "text/javascript", content });
+const isEditable = (file: ProjectFile) => file.kind === "text";
+const normalizedProjectPath = (value: string) => value.trim().replace(/\\/g, "/").replace(/^\.\//, "");
+
+const findCodeMatches = (source: string, query: string) => {
+  if (!query) return [];
+  const matches: number[] = [];
+  const haystack = source.toLocaleLowerCase();
+  const needle = query.toLocaleLowerCase();
+  let offset = 0;
+  while (offset <= haystack.length - needle.length) {
+    const match = haystack.indexOf(needle, offset);
+    if (match === -1) break;
+    matches.push(match);
+    offset = match + Math.max(needle.length, 1);
+  }
+  return matches;
+};
 
 function Icon({ children }: { children: React.ReactNode }) {
   return <span aria-hidden="true">{children}</span>;
@@ -289,11 +243,13 @@ export default function Playground() {
   const [projectName, setProjectName] = useState(PRESETS[0].name);
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
   const [code, setCode] = useState(PRESETS[0].code);
-  const [library, setLibrary] = useState<SavedProject[]>([]);
+  const [files, setFiles] = useState<ProjectFile[]>([mainFile(PRESETS[0].code)]);
+  const [activePath, setActivePath] = useState("main.js");
+  const [library, setLibrary] = useState<ProjectRecord[]>([]);
   const [libraryOpen, setLibraryOpen] = useState(false);
-  const [fileSearchOpen, setFileSearchOpen] = useState(false);
-  const [fileSearchQuery, setFileSearchQuery] = useState("");
-  const [fileSearchIndex, setFileSearchIndex] = useState(0);
+  const [codeSearchOpen, setCodeSearchOpen] = useState(false);
+  const [codeSearchQuery, setCodeSearchQuery] = useState("");
+  const [codeSearchIndex, setCodeSearchIndex] = useState(0);
   const [running, setRunning] = useState(true);
   const [autoRun, setAutoRun] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -301,6 +257,7 @@ export default function Playground() {
   const [elapsed, setElapsed] = useState(0);
   const [resolution, setResolution] = useState({ width: 0, height: 0 });
   const [saved, setSaved] = useState(true);
+  const [editorOpen, setEditorOpen] = useState(true);
   const [chatOpen, setChatOpen] = useState(false);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [chatInput, setChatInput] = useState("");
@@ -308,13 +265,14 @@ export default function Playground() {
   const [chatOnline, setChatOnline] = useState<boolean | null>(null);
   const [chatProgress, setChatProgress] = useState("");
   const [codexThreadId, setCodexThreadId] = useState<string | null>(null);
-  const [undoCode, setUndoCode] = useState<string | null>(null);
+  const [undoFiles, setUndoFiles] = useState<ProjectFile[] | null>(null);
   const mountRef = useRef<HTMLDivElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
   const runtimeRef = useRef<GraphicsRuntime | null>(null);
   const importRef = useRef<HTMLInputElement>(null);
+  const assetRef = useRef<HTMLInputElement>(null);
   const editorRef = useRef<HTMLTextAreaElement>(null);
-  const fileSearchRef = useRef<HTMLInputElement>(null);
+  const codeSearchRef = useRef<HTMLInputElement>(null);
   const pointer = useRef<PointerState>({ x: 0, y: 0, px: 0, py: 0, down: false });
   const startTime = useRef(0);
   const pausedAt = useRef(0);
@@ -329,23 +287,25 @@ export default function Playground() {
   const chatAbortRef = useRef<AbortController | null>(null);
 
   const lines = useMemo(() => code.split("\n").length, [code]);
-  const fileSearchItems = useMemo<FileSearchItem[]>(() => [
-    { id: "__current__", name: projectName.trim() || "Untitled sketch", code, current: true },
-    ...library.filter((project) => project.id !== activeProjectId),
-  ], [activeProjectId, code, library, projectName]);
-  const fileSearchResults = useMemo(() => {
-    const query = fileSearchQuery.trim().toLocaleLowerCase();
-    if (!query) return fileSearchItems;
-    return fileSearchItems.filter((item) => `${item.name} main.js`.toLocaleLowerCase().includes(query));
-  }, [fileSearchItems, fileSearchQuery]);
+  const projectFiles = useMemo(() => files.map((file) => file.path === activePath && file.kind === "text" ? { ...file, content: code } : file), [activePath, code, files]);
+  const codeSearchMatches = useMemo(() => findCodeMatches(code, codeSearchQuery), [code, codeSearchQuery]);
+  const activeCodeSearchIndex = codeSearchMatches.length ? codeSearchIndex % codeSearchMatches.length : 0;
 
   useEffect(() => { codeRef.current = code; }, [code]);
   useEffect(() => { autoRunRef.current = autoRun; }, [autoRun]);
   useEffect(() => {
-    if (!fileSearchOpen) return;
-    const timer = window.setTimeout(() => fileSearchRef.current?.focus(), 0);
+    if (!codeSearchOpen) return;
+    const timer = window.setTimeout(() => codeSearchRef.current?.focus(), 0);
     return () => window.clearTimeout(timer);
-  }, [fileSearchOpen]);
+  }, [codeSearchOpen]);
+  useEffect(() => {
+    const editor = editorRef.current;
+    const offset = codeSearchMatches[activeCodeSearchIndex];
+    if (!editor || offset === undefined) return;
+    editor.setSelectionRange(offset, offset + codeSearchQuery.length);
+    const line = code.slice(0, offset).split("\n").length - 1;
+    editor.scrollTop = Math.max(0, line * 18.7 - editor.clientHeight / 2);
+  }, [activeCodeSearchIndex, code, codeSearchMatches, codeSearchQuery]);
 
   const teardown = useCallback(() => {
     const runtime = runtimeRef.current;
@@ -370,13 +330,13 @@ export default function Playground() {
     };
   }, []);
 
-  const runSource = useCallback((source: string) => {
+  const runSource = useCallback((sourceFiles: ProjectFile[], entry = "main.js") => {
     const mount = mountRef.current;
     if (!mount) return;
     teardown();
     try {
       const viewport = currentViewport();
-      const runtime = compileModule(source, mount, viewport);
+      const runtime = compileProject(sourceFiles, entry, mount, viewport);
       runtimeRef.current = runtime;
       runtime.resize?.(viewport);
       sizeRef.current = viewport;
@@ -399,14 +359,14 @@ export default function Playground() {
     teardown();
     try {
       const viewport = currentViewport();
-      const runtime = compileModule(code, mount, viewport);
+      const runtime = compileProject(projectFiles, "main.js", mount, viewport);
       runtimeRef.current = runtime;
       runtime.resize?.(viewport);
       sizeRef.current = viewport;
       setResolution({ width: viewport.width, height: viewport.height });
       setError(null);
       setSaved(false);
-      localStorage.setItem(STORAGE_DRAFT, JSON.stringify({ projectName, code, activeProjectId, saved }));
+      void putDraft({ id: activeProjectId ?? "draft", name: projectName, entry: "main.js", runtimeId: "three", files: projectFiles, activePath, saved });
       startTime.current = performance.now();
       lastFrame.current = startTime.current;
       frameCount.current = 0;
@@ -417,45 +377,77 @@ export default function Playground() {
       setError(caught instanceof Error ? caught.message : "Unknown module error");
       setRunning(false);
     }
-  }, [activeProjectId, code, currentViewport, projectName, saved, teardown]);
+  }, [activePath, activeProjectId, currentViewport, projectFiles, projectName, saved, teardown]);
 
   useEffect(() => {
-    const timer = window.setTimeout(() => {
-      let sourceToRestore = PRESETS[0].code;
+    let cancelled = false;
+    void (async () => {
+      let sourceToRestore: ProjectFile[] = [mainFile(PRESETS[0].code)];
       try {
-        const storedLibrary = JSON.parse(localStorage.getItem(STORAGE_LIBRARY) ?? "[]") as SavedProject[];
-        if (Array.isArray(storedLibrary)) setLibrary(storedLibrary);
-        const draft = JSON.parse(localStorage.getItem(STORAGE_DRAFT) ?? "null") as DraftProject | null;
-        if (draft?.code) {
-          sourceToRestore = draft.code;
-          setCode(draft.code);
-          setProjectName(draft.projectName || "Untitled sketch");
-          setActiveProjectId(draft.activeProjectId ?? null);
-          setSaved(draft.saved ?? false);
+        let storedProjects = await listProjects();
+        if (!storedProjects.length) {
+          const legacy = JSON.parse(localStorage.getItem(STORAGE_LIBRARY) ?? "[]") as LegacyProject[];
+          if (Array.isArray(legacy)) {
+            storedProjects = legacy.filter((item) => item?.code).map((item) => ({
+              id: item.id, name: item.name, entry: "main.js", runtimeId: "three", files: [mainFile(item.code)], updatedAt: item.updatedAt,
+            }));
+            await Promise.all(storedProjects.map(putProject));
+          }
+        }
+        if (!cancelled) setLibrary(storedProjects);
+        let draft = await getDraft();
+        if (!draft) {
+          const legacyDraft = JSON.parse(localStorage.getItem(STORAGE_DRAFT) ?? "null") as LegacyDraft | null;
+          if (legacyDraft?.code) {
+            draft = {
+              id: legacyDraft.activeProjectId ?? "draft", name: legacyDraft.projectName || "Untitled sketch", entry: "main.js",
+              runtimeId: "three", files: [mainFile(legacyDraft.code)], activePath: "main.js", saved: legacyDraft.saved ?? false,
+            };
+          }
+        }
+        if (draft?.files.length) {
+          sourceToRestore = draft.files;
+          const restoredPath = draft.files.some((file) => file.path === draft.activePath && file.kind === "text") ? draft.activePath : draft.entry;
+          const restoredFile = draft.files.find((file) => file.path === restoredPath);
+          if (!cancelled && restoredFile?.kind === "text") {
+            setFiles(draft.files);
+            setActivePath(restoredPath);
+            setCode(restoredFile.content);
+            setProjectName(draft.name || "Untitled sketch");
+            setActiveProjectId(draft.id === "draft" ? null : draft.id);
+            setSaved(draft.saved);
+          }
         }
         const storedChat = JSON.parse(localStorage.getItem(STORAGE_CHAT) ?? "[]") as ChatMessage[];
-        if (Array.isArray(storedChat)) setChatMessages(storedChat);
-        setCodexThreadId(localStorage.getItem(STORAGE_THREAD));
+        if (!cancelled && Array.isArray(storedChat)) setChatMessages(storedChat);
+        if (!cancelled) setCodexThreadId(localStorage.getItem(STORAGE_THREAD));
         const preferences = JSON.parse(localStorage.getItem(STORAGE_PREFERENCES) ?? "{}") as StudioPreferences;
-        setChatOpen(preferences.chatOpen ?? false);
-        setAutoRun(preferences.autoRun ?? false);
-      } catch { /* ignore malformed browser data */ }
+        if (!cancelled) {
+          setChatOpen(preferences.chatOpen ?? false);
+          setAutoRun(preferences.autoRun ?? false);
+          setEditorOpen(preferences.editorOpen ?? true);
+        }
+      } catch { /* fall back to the starter project */ }
+      if (cancelled) return;
       draftReadyRef.current = true;
       preferencesReadyRef.current = true;
       runSource(sourceToRestore);
-    }, 0);
-    return () => window.clearTimeout(timer);
+    })();
+    return () => { cancelled = true; };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (!draftReadyRef.current) return;
-    localStorage.setItem(STORAGE_DRAFT, JSON.stringify({ projectName, code, activeProjectId, saved }));
-  }, [activeProjectId, code, projectName, saved]);
+    const timer = window.setTimeout(() => {
+      void putDraft({ id: activeProjectId ?? "draft", name: projectName, entry: "main.js", runtimeId: "three", files: projectFiles, activePath, saved });
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [activePath, activeProjectId, projectFiles, projectName, saved]);
 
   useEffect(() => {
     if (!preferencesReadyRef.current) return;
-    localStorage.setItem(STORAGE_PREFERENCES, JSON.stringify({ chatOpen, autoRun }));
-  }, [autoRun, chatOpen]);
+    localStorage.setItem(STORAGE_PREFERENCES, JSON.stringify({ chatOpen, autoRun, editorOpen }));
+  }, [autoRun, chatOpen, editorOpen]);
 
   const checkCodex = useCallback(async () => {
     setChatOnline(null);
@@ -524,53 +516,103 @@ export default function Playground() {
 
   useEffect(() => () => teardown(), [teardown]);
 
-  const persistLibrary = (projects: SavedProject[]) => {
-    setLibrary(projects);
-    localStorage.setItem(STORAGE_LIBRARY, JSON.stringify(projects));
-  };
-
-  const saveProject = () => {
+  const saveProject = async () => {
     const now = new Date().toISOString();
     const id = activeProjectId ?? crypto.randomUUID();
-    const project: SavedProject = { id, name: projectName.trim() || "Untitled sketch", code, updatedAt: now };
+    const project: ProjectRecord = {
+      id, name: projectName.trim() || "Untitled sketch", entry: "main.js", runtimeId: "three", files: projectFiles, updatedAt: now,
+    };
+    await putProject(project);
     const next = [project, ...library.filter((item) => item.id !== id)];
-    persistLibrary(next);
+    setLibrary(next);
     setActiveProjectId(id);
     setSaved(true);
   };
 
-  const loadProject = (project: SavedProject) => {
+  const loadProject = (project: ProjectRecord) => {
+    const entryFile = project.files.find((file) => file.path === project.entry);
+    if (!entryFile || entryFile.kind !== "text") return;
     setProjectName(project.name);
-    setCode(project.code);
+    setFiles(project.files);
+    setActivePath(project.entry);
+    setCode(entryFile.content);
     setActiveProjectId(project.id);
     setSaved(true);
     setLibraryOpen(false);
-    window.setTimeout(() => runSource(project.code), 0);
+    window.setTimeout(() => runSource(project.files, project.entry), 0);
   };
 
-  const openFileSearch = () => {
-    setFileSearchQuery("");
-    setFileSearchIndex(0);
-    setFileSearchOpen(true);
+  const selectFile = (path: string) => {
+    const nextFiles = projectFiles;
+    const file = nextFiles.find((candidate) => candidate.path === path);
+    setFiles(nextFiles);
+    setActivePath(path);
+    if (file?.kind === "text") setCode(file.content);
   };
 
-  const chooseFileSearchItem = (item: FileSearchItem) => {
-    setFileSearchOpen(false);
-    if (item.current) {
-      window.setTimeout(() => editorRef.current?.focus(), 0);
-      return;
+  const addTextFile = () => {
+    const requested = window.prompt("New project file", "module.js");
+    if (!requested) return;
+    const path = normalizedProjectPath(requested);
+    if (!path || path.startsWith("/") || path.split("/").includes("..")) return setError("Choose a relative project path");
+    if (projectFiles.some((file) => file.path === path)) return selectFile(path);
+    const mimeType = path.endsWith(".glsl") || path.endsWith(".frag") || path.endsWith(".vert") ? "text/plain" : path.endsWith(".json") ? "application/json" : "text/javascript";
+    const file: ProjectFile = { path, kind: "text", mimeType, content: "" };
+    setFiles([...projectFiles, file]);
+    setActivePath(path);
+    setCode("");
+    setSaved(false);
+  };
+
+  const addAssets = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const incoming = [...(event.target.files ?? [])];
+    if (!incoming.length) return;
+    const next = [...projectFiles];
+    for (const file of incoming) {
+      const path = `assets/${file.name}`;
+      const replacement: ProjectFile = { path, kind: "asset", mimeType: file.type || "application/octet-stream", content: file };
+      const index = next.findIndex((candidate) => candidate.path === path);
+      if (index === -1) next.push(replacement); else next[index] = replacement;
     }
-    loadProject(item as SavedProject);
+    setFiles(next);
+    setSaved(false);
+    event.target.value = "";
+  };
+
+  const openCodeSearch = () => {
+    const editor = editorRef.current;
+    const selection = editor?.value.slice(editor.selectionStart, editor.selectionEnd) ?? "";
+    if (selection && !selection.includes("\n")) setCodeSearchQuery(selection);
+    setCodeSearchIndex(0);
+    setCodeSearchOpen(true);
+  };
+
+  const closeCodeSearch = () => {
+    setCodeSearchOpen(false);
+    window.setTimeout(() => editorRef.current?.focus(), 0);
+  };
+
+  const toggleEditor = () => {
+    if (editorOpen) setCodeSearchOpen(false);
+    setEditorOpen(!editorOpen);
+  };
+
+  const stepCodeSearch = (direction: 1 | -1) => {
+    if (!codeSearchMatches.length) return;
+    setCodeSearchIndex((index) => (index + direction + codeSearchMatches.length) % codeSearchMatches.length);
   };
 
   const choosePreset = (index: number) => {
     const preset = PRESETS[index];
+    const nextFiles = [mainFile(preset.code)];
     setPresetIndex(index);
     setProjectName(preset.name);
+    setFiles(nextFiles);
+    setActivePath("main.js");
     setCode(preset.code);
     setActiveProjectId(null);
     setSaved(false);
-    runSource(preset.code);
+    runSource(nextFiles);
   };
 
   const toggleRunning = () => {
@@ -584,8 +626,9 @@ export default function Playground() {
     }
   };
 
-  const download = (filename: string, contents: string, type: string) => {
-    const url = URL.createObjectURL(new Blob([contents], { type }));
+  const download = (filename: string, contents: Blob | string, type?: string) => {
+    const blob = contents instanceof Blob ? contents : new Blob([contents], { type });
+    const url = URL.createObjectURL(blob);
     const anchor = document.createElement("a");
     anchor.href = url;
     anchor.download = filename;
@@ -594,26 +637,47 @@ export default function Playground() {
   };
 
   const exportSource = () => download(`${safeName(projectName)}.js`, code, "text/javascript");
-  const exportLibrary = () => download("jslife-library.json", JSON.stringify({ version: 1, projects: library }, null, 2), "application/json");
+  const exportProject = async () => {
+    const project: ProjectRecord = {
+      id: activeProjectId ?? crypto.randomUUID(), name: projectName, entry: "main.js", runtimeId: "three", files: projectFiles, updatedAt: new Date().toISOString(),
+    };
+    download(`${safeName(projectName)}.jslife`, await packProject(project));
+  };
+  const exportLibrary = () => download("jslife-library.json", JSON.stringify({
+    version: 2,
+    projects: library.map((project) => ({ ...project, files: project.files.filter((file) => file.kind === "text") })),
+    note: "Text backup only. Export individual .jslife projects to include binary assets.",
+  }, null, 2), "application/json");
 
   const importFile = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
     try {
-      const text = await file.text();
-      if (file.name.toLowerCase().endsWith(".json")) {
-        const parsed = JSON.parse(text) as { projects?: SavedProject[] } | SavedProject[];
-        const projects = Array.isArray(parsed) ? parsed : parsed.projects;
-        if (!Array.isArray(projects)) throw new Error("Library JSON has no projects array");
-        const merged = [...projects, ...library.filter((item) => !projects.some((incoming) => incoming.id === item.id))];
-        persistLibrary(merged);
+      if (file.name.toLowerCase().endsWith(".jslife")) {
+        const project = await unpackProject(file);
+        setLibrary([project, ...library]);
+        await putProject(project);
+        loadProject(project);
+      } else if (file.name.toLowerCase().endsWith(".json")) {
+        const parsed = JSON.parse(await file.text()) as { projects?: Array<ProjectRecord | LegacyProject> } | Array<ProjectRecord | LegacyProject>;
+        const incoming = Array.isArray(parsed) ? parsed : parsed.projects;
+        if (!Array.isArray(incoming)) throw new Error("Library JSON has no projects array");
+        const projects = incoming.map<ProjectRecord>((project) => "files" in project ? project : {
+          id: project.id, name: project.name, entry: "main.js", runtimeId: "three", files: [mainFile(project.code)], updatedAt: project.updatedAt,
+        });
+        await Promise.all(projects.map(putProject));
+        setLibrary([...projects, ...library.filter((item) => !projects.some((candidate) => candidate.id === item.id))]);
         setLibraryOpen(true);
       } else {
+        const text = await file.text();
+        const nextFiles = [mainFile(text)];
         setProjectName(file.name.replace(/\.js$/i, ""));
+        setFiles(nextFiles);
+        setActivePath("main.js");
         setCode(text);
         setActiveProjectId(null);
         setSaved(false);
-        runSource(text);
+        runSource(nextFiles);
       }
       setError(null);
     } catch (caught) {
@@ -669,6 +733,36 @@ export default function Playground() {
     });
   };
 
+  const applyFileChanges = (changes: FileAction[], baseFiles = projectFiles) => {
+    let next = [...baseFiles];
+    for (const change of changes) {
+      const path = normalizedProjectPath(change.path);
+      if (!path || path.startsWith("/") || path.split("/").includes("..")) continue;
+      if (change.type === "delete") {
+        if (path !== "main.js") next = next.filter((file) => file.path !== path);
+        continue;
+      }
+      if (change.type === "move") {
+        const destination = normalizedProjectPath(change.to ?? "");
+        if (path === "main.js" || !destination || destination.startsWith("/") || destination.split("/").includes("..")) continue;
+        if (next.some((file) => file.path === destination)) continue;
+        next = next.map((file) => file.path === path ? { ...file, path: destination } : file);
+        continue;
+      }
+      if (typeof change.content !== "string") continue;
+      const replacement: ProjectFile = { path, kind: "text", mimeType: change.mimeType || "text/javascript", content: change.content };
+      const index = next.findIndex((file) => file.path === path);
+      if (index === -1) next.push(replacement); else next[index] = replacement;
+    }
+    setUndoFiles(baseFiles);
+    setFiles(next);
+    const current = next.find((file) => file.path === activePath);
+    if (current?.kind === "text") setCode(current.content);
+    else selectFile("main.js");
+    setSaved(false);
+    if (!autoRun) window.setTimeout(() => runSource(next), 0);
+  };
+
   const sendChat = async () => {
     const requestText = chatInput.trim();
     if (!requestText || chatBusy) return;
@@ -691,6 +785,9 @@ export default function Playground() {
         body: JSON.stringify({
           message: requestText,
           code,
+          files: projectFiles.map((file) => file.kind === "text"
+            ? { path: file.path, kind: file.kind, mimeType: file.mimeType, content: file.content }
+            : { path: file.path, kind: file.kind, mimeType: file.mimeType, size: file.content.size }),
           error,
           projectName,
           threadId: codexThreadId,
@@ -726,18 +823,14 @@ export default function Playground() {
           localStorage.setItem(STORAGE_THREAD, event.threadId);
         }
         if (event.type === "result" && event.result) {
-          const proposal = event.result.action === "replace" ? event.result.code : undefined;
-          const autoApplied = Boolean(proposal && autoRunRef.current && codeRef.current === code);
-          if (proposal && autoApplied) {
-            setUndoCode(codeRef.current);
-            setCode(proposal);
-            setSaved(false);
-          }
+          const proposal = event.result.action === "changes" ? event.result.changes : undefined;
+          const autoApplied = Boolean(proposal?.length && autoRunRef.current && codeRef.current === code);
+          if (proposal?.length && autoApplied) applyFileChanges(proposal, projectFiles);
           appendChat({
             id: crypto.randomUUID(),
             role: "assistant",
             text: event.result.message,
-            code: autoApplied ? undefined : proposal,
+            changes: autoApplied ? undefined : proposal,
             autoApplied,
           });
         }
@@ -770,18 +863,13 @@ export default function Playground() {
     }
   };
 
-  const applySuggestion = (suggestion: string) => {
-    setUndoCode(code);
-    setCode(suggestion);
-    setSaved(false);
-    if (!autoRun) runSource(suggestion);
-  };
-
   const undoSuggestion = () => {
-    if (undoCode === null) return;
-    const previous = undoCode;
-    setCode(previous);
-    setUndoCode(null);
+    if (undoFiles === null) return;
+    const previous = undoFiles;
+    setFiles(previous);
+    const current = previous.find((file) => file.path === activePath);
+    if (current?.kind === "text") setCode(current.content);
+    setUndoFiles(null);
     setSaved(false);
     if (!autoRun) runSource(previous);
   };
@@ -793,8 +881,9 @@ export default function Playground() {
   };
 
   return (
-    <main className={`studio ${chatOpen ? "chat-open" : ""}`}>
-      <input ref={importRef} className="visually-hidden" type="file" accept=".js,.json,text/javascript,application/json" onChange={importFile} />
+    <main className={`studio ${chatOpen ? "chat-open" : ""} ${editorOpen ? "" : "editor-closed"}`}>
+      <input ref={importRef} className="visually-hidden" type="file" accept=".js,.json,.jslife,text/javascript,application/json,application/x-jslife-project" onChange={importFile} />
+      <input ref={assetRef} className="visually-hidden" type="file" multiple onChange={addAssets} />
       <header className="topbar">
         <div className="brand"><span className="brand-mark">J</span><span>JSLIFE</span></div>
         <nav className="main-nav" aria-label="Main navigation"><button className={!chatOpen ? "nav-active" : ""} onClick={() => setChatOpen(false)}>Studio</button><button onClick={() => setLibraryOpen(true)}>Library</button><button className={chatOpen ? "nav-active" : ""} onClick={() => setChatOpen(true)}>Codex</button></nav>
@@ -802,7 +891,8 @@ export default function Playground() {
           <span className={`save-state ${saved ? "saved" : ""}`}><i />{saved ? "Saved in library" : "Unsaved changes"}</span>
           <button className="text-button" onClick={() => importRef.current?.click()}>Import</button>
           <button className="text-button" onClick={exportSource}>Export .js</button>
-          <button className="save-button" onClick={saveProject}>Save</button>
+          <button className="text-button" onClick={() => void exportProject()}>Export .jslife</button>
+          <button className="save-button" onClick={() => void saveProject()}>Save</button>
           <button className="ai-button" onClick={() => setChatOpen((open) => !open)}><Icon>✦</Icon> Codex</button>
           <button className="run-button" onClick={runCode}><Icon>▶</Icon> Run</button>
         </div>
@@ -816,16 +906,36 @@ export default function Playground() {
 
       <section className="workspace">
         <aside className="rail" aria-label="Studio tools">
-          <button className="rail-active" aria-label="Code"><Icon>⌘</Icon></button>
+          <button className={editorOpen ? "rail-active" : ""} aria-label={editorOpen ? "Hide code editor" : "Show code editor"} aria-pressed={editorOpen} onClick={toggleEditor} title={editorOpen ? "Hide code editor" : "Show code editor"}><Icon>⌘</Icon></button>
           <button aria-label="Library" onClick={() => setLibraryOpen(true)}><Icon>▤</Icon></button>
           <button aria-label="Import" onClick={() => importRef.current?.click()}><Icon>⇣</Icon></button>
+          <button aria-label="Add assets" onClick={() => assetRef.current?.click()} title="Add assets"><Icon>◇</Icon></button>
           <button className={chatOpen ? "rail-ai-active" : ""} aria-label="Codex chat" onClick={() => setChatOpen((open) => !open)}><Icon>✦</Icon></button>
           <span className="rail-spacer" /><button aria-label="Settings"><Icon>⚙</Icon></button>
         </aside>
 
         <section className="editor-panel" aria-label="JavaScript module editor">
-          <div className="panel-heading"><span>JAVASCRIPT MODULE</span><div><span className="module-api">THREE · mount · frame · resize</span><button className="editor-file-search" onClick={openFileSearch} title="Search files (⌘F)" aria-label="Search files">⌕ <kbd>⌘F</kbd></button></div></div>
-          <div className="tabs"><button className="tab-active"><i style={{ background: PRESETS[presetIndex].accent }} />main.js <span>{saved ? "×" : "●"}</span></button><button className="add-tab" aria-label="New file">＋</button></div>
+          <div className="panel-heading"><span>PROJECT FILES</span><div><button className="asset-add" onClick={() => assetRef.current?.click()} title="Add assets">＋ asset</button><span className="module-api">{projectFiles.filter((file) => file.kind === "asset").length} assets</span><button className="editor-code-search" onClick={openCodeSearch} title="Find in code (⌘F)" aria-label="Find in code">⌕ <kbd>⌘F</kbd></button></div></div>
+          <div className="tabs">{projectFiles.filter(isEditable).map((file) => <button key={file.path} className={file.path === activePath ? "tab-active" : "file-tab"} onClick={() => selectFile(file.path)} title={file.path}><i style={{ background: PRESETS[presetIndex].accent }} />{file.path.split("/").pop()} <span>{file.path === activePath && !saved ? "●" : "×"}</span></button>)}<button className="add-tab" onClick={addTextFile} aria-label="New file">＋</button></div>
+          {codeSearchOpen && <div className="code-search" role="search">
+            <span aria-hidden="true">⌕</span>
+            <input
+              ref={codeSearchRef}
+              value={codeSearchQuery}
+              onChange={(event) => { setCodeSearchQuery(event.target.value); setCodeSearchIndex(0); }}
+              onKeyDown={(event) => {
+                if (event.key === "Escape") { event.preventDefault(); closeCodeSearch(); }
+                if (event.key === "Enter") { event.preventDefault(); stepCodeSearch(event.shiftKey ? -1 : 1); }
+              }}
+              placeholder={`Find in ${activePath}`}
+              aria-label="Find in code"
+              autoComplete="off"
+            />
+            <span className="code-search-count">{codeSearchQuery ? (codeSearchMatches.length ? `${activeCodeSearchIndex + 1}/${codeSearchMatches.length}` : "0/0") : ""}</span>
+            <button onClick={() => stepCodeSearch(-1)} disabled={!codeSearchMatches.length} aria-label="Previous match">↑</button>
+            <button onClick={() => stepCodeSearch(1)} disabled={!codeSearchMatches.length} aria-label="Next match">↓</button>
+            <button onClick={closeCodeSearch} aria-label="Close search">×</button>
+          </div>}
           <div className="editor-wrap">
             <pre className="line-numbers" aria-hidden="true">{Array.from({ length: lines }, (_, i) => i + 1).join("\n")}</pre>
             <textarea
@@ -833,7 +943,7 @@ export default function Playground() {
               value={code}
               onChange={(event) => { setCode(event.target.value); setSaved(false); }}
               onKeyDown={(event) => {
-                if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "f") { event.preventDefault(); openFileSearch(); }
+                if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "f") { event.preventDefault(); openCodeSearch(); }
                 if ((event.metaKey || event.ctrlKey) && event.key === "Enter") { event.preventDefault(); runCode(); }
                 if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "s") { event.preventDefault(); saveProject(); }
                 if (event.key === "Tab") {
@@ -846,10 +956,10 @@ export default function Playground() {
                 }
               }}
               spellCheck={false}
-              aria-label="JavaScript source code"
+              aria-label={`${activePath} source code`}
             />
           </div>
-          <div className="editor-status"><span>JavaScript ES Module</span><span>{lines} lines</span><span>UTF-8</span><span className="context-ready">● WebGL ready</span></div>
+          <div className="editor-status"><span>{activePath}</span><span>{lines} lines</span><span>UTF-8</span><span className="context-ready">● {projectFiles.length} files ready</span></div>
         </section>
 
         <section className="preview-panel">
@@ -863,7 +973,7 @@ export default function Playground() {
             onPointerUp={() => { pointer.current.down = false; }}
           >
             <div className="render-mount" ref={mountRef} />
-            <div className="stage-label"><span>WEBGL RENDERER</span><small>main.js · Move your pointer</small></div>
+            <div className="stage-label"><span>WEBGL RENDERER</span><small>main.js · {projectFiles.length} project files</small></div>
             {error && <div className="error-toast"><strong>Module stopped</strong><span>{error}</span></div>}
           </div>
           <div className="transport">
@@ -893,16 +1003,16 @@ export default function Playground() {
           <div className="chat-messages">
             {!chatMessages.length && <div className="chat-welcome">
               <span>✦</span>
-              <strong>main.jsを見ながら相談できます</strong>
-              <p>説明、エラー診断、Three.jsコードの変更を頼めます。変更案は確認してから適用されます。</p>
+              <strong>プロジェクト全体を見ながら相談できます</strong>
+              <p>複数のJS・シェーダーとアセット一覧を確認し、ファイル単位の変更を提案できます。</p>
             </div>}
             {chatMessages.map((message) => <article key={message.id} className={`chat-message ${message.role}`}>
               <small>{message.role === "user" ? "YOU" : "CODEX"}</small>
               <p>{message.text}</p>
               {message.autoApplied && <div className="auto-applied">✓ Auto-runで適用済み</div>}
-              {message.code && <div className="code-proposal">
-                <div><span>main.js</span><small>{message.code.split("\n").length} lines · complete replacement</small></div>
-                <button onClick={() => applySuggestion(message.code!)}>適用</button>
+              {message.changes?.length && <div className="code-proposal">
+                <div><span>{message.changes.length} file changes</span><small>{message.changes.map((change) => change.type === "delete" ? `− ${change.path}` : change.type === "move" ? `↳ ${change.path} → ${change.to}` : `+ ${change.path}`).join(" · ")}</small></div>
+                <button onClick={() => applyFileChanges(message.changes!)}>変更を適用</button>
               </div>}
             </article>)}
             {chatBusy && <div className="chat-thinking"><i /><span>{chatProgress || "Codexが考えています…"}</span><button onClick={() => chatAbortRef.current?.abort()}>停止</button></div>}
@@ -910,7 +1020,7 @@ export default function Playground() {
           </div>
 
           <div className="chat-composer">
-            {undoCode !== null && <button className="undo-code" onClick={undoSuggestion}>↶ 最後のAI変更を元に戻す</button>}
+            {undoFiles !== null && <button className="undo-code" onClick={undoSuggestion}>↶ 最後のAI変更を元に戻す</button>}
             <div className="prompt-chips">
               <button onClick={() => setChatInput("このコードの構成を簡潔に説明して")}>説明</button>
               <button onClick={() => setChatInput("現在のエラーを診断して、必要なら修正版を提案して")}>エラー修正</button>
@@ -927,12 +1037,12 @@ export default function Playground() {
                     void sendChat();
                   }
                 }}
-                placeholder="main.jsについてCodexに相談…"
+                placeholder="プロジェクトのコードやアセットについてCodexに相談…"
                 rows={3}
               />
               <button onClick={() => void sendChat()} disabled={!chatInput.trim() || chatBusy} aria-label="Send to Codex">↑</button>
             </div>
-            <small className="chat-privacy">現在のコードとプレビュー画像をローカルCodexへ送信 · Auto-run以外は自動適用されません</small>
+            <small className="chat-privacy">テキストファイル、アセット一覧、プレビューをローカルCodexへ送信 · バイナリアセット本体は送信しません</small>
           </div>
         </aside>
       </section>
@@ -950,55 +1060,14 @@ export default function Playground() {
           <div className="library-list">
             {!library.length && <div className="empty-library"><i>＋</i><strong>No saved sketches yet</strong><span>Press Save to add the current JavaScript file.</span></div>}
             {library.map((project) => <article key={project.id} className={project.id === activeProjectId ? "library-active" : ""}>
-              <button className="library-load" onClick={() => loadProject(project)}><i /><span><strong>{project.name}</strong><small>main.js · {project.code.split("\n").length} lines</small></span><time>{new Date(project.updatedAt).toLocaleDateString()}</time></button>
-              <button className="library-delete" onClick={() => persistLibrary(library.filter((item) => item.id !== project.id))} aria-label={`Delete ${project.name}`}>×</button>
+              <button className="library-load" onClick={() => loadProject(project)}><i /><span><strong>{project.name}</strong><small>{project.files.length} files · {project.files.filter((file) => file.kind === "asset").length} assets</small></span><time>{new Date(project.updatedAt).toLocaleDateString()}</time></button>
+              <button className="library-delete" onClick={() => { void removeProject(project.id); setLibrary(library.filter((item) => item.id !== project.id)); }} aria-label={`Delete ${project.name}`}>×</button>
             </article>)}
           </div>
           <div className="library-note"><span>DEVICE STORAGE</span><p>Projects stay in this browser. Export a JSON backup before clearing browser data.</p></div>
         </aside>
       </div>}
 
-      {fileSearchOpen && <div className="file-search-backdrop" onPointerDown={() => setFileSearchOpen(false)}>
-        <section className="file-search" role="dialog" aria-modal="true" aria-label="Search files" onPointerDown={(event) => event.stopPropagation()}>
-          <div className="file-search-input">
-            <span aria-hidden="true">⌕</span>
-            <input
-              ref={fileSearchRef}
-              value={fileSearchQuery}
-              onChange={(event) => { setFileSearchQuery(event.target.value); setFileSearchIndex(0); }}
-              onKeyDown={(event) => {
-                if (event.key === "Escape") { event.preventDefault(); setFileSearchOpen(false); editorRef.current?.focus(); }
-                if (event.key === "ArrowDown") { event.preventDefault(); setFileSearchIndex((index) => Math.min(index + 1, Math.max(0, fileSearchResults.length - 1))); }
-                if (event.key === "ArrowUp") { event.preventDefault(); setFileSearchIndex((index) => Math.max(0, index - 1)); }
-                if (event.key === "Enter" && fileSearchResults[fileSearchIndex]) { event.preventDefault(); chooseFileSearchItem(fileSearchResults[fileSearchIndex]); }
-              }}
-              placeholder="Search saved files…"
-              aria-label="File name"
-              aria-controls="file-search-results"
-              aria-activedescendant={fileSearchResults[fileSearchIndex] ? `file-search-${fileSearchResults[fileSearchIndex].id}` : undefined}
-              autoComplete="off"
-            />
-            <kbd>ESC</kbd>
-          </div>
-          <div className="file-search-results" id="file-search-results" role="listbox">
-            {!fileSearchResults.length && <div className="file-search-empty">No matching files</div>}
-            {fileSearchResults.map((item, index) => <button
-              id={`file-search-${item.id}`}
-              key={item.id}
-              className={index === fileSearchIndex ? "file-search-active" : ""}
-              role="option"
-              aria-selected={index === fileSearchIndex}
-              onMouseEnter={() => setFileSearchIndex(index)}
-              onClick={() => chooseFileSearchItem(item)}
-            >
-              <i aria-hidden="true">JS</i>
-              <span><strong>{item.name}</strong><small>main.js · {item.code.split("\n").length} lines</small></span>
-              <em>{item.current ? "CURRENT" : item.updatedAt ? new Date(item.updatedAt).toLocaleDateString() : "SAVED"}</em>
-            </button>)}
-          </div>
-          <footer><span><kbd>↑</kbd><kbd>↓</kbd> navigate</span><span><kbd>↵</kbd> open</span><span>{fileSearchResults.length} files</span></footer>
-        </section>
-      </div>}
     </main>
   );
 }
