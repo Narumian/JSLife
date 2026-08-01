@@ -14,18 +14,18 @@ export async function generateMetadata(): Promise<Metadata> {
 
   return {
     title: "JSLIFE — Creative JavaScript Studio",
-    description: "Write JavaScript, shape motion, and see every change live in the browser.",
+    description: "Edit complete JavaScript modules and run Three.js graphics live in the browser.",
     icons: { icon: "/favicon.svg", shortcut: "/favicon.svg" },
     openGraph: {
       title: "JSLIFE — Creative JavaScript Studio",
-      description: "Write code. Shape motion. See every change live.",
+      description: "Edit JavaScript modules. Run Three.js graphics live.",
       type: "website",
       images: [{ url: `${origin}/og.png`, width: 1200, height: 630, alt: "JSLIFE Creative JavaScript Studio" }],
     },
     twitter: {
       card: "summary_large_image",
       title: "JSLIFE — Creative JavaScript Studio",
-      description: "Write code. Shape motion. See every change live.",
+      description: "Edit JavaScript modules. Run Three.js graphics live.",
       images: [`${origin}/og.png`],
     },
   };
