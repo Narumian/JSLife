@@ -23,7 +23,13 @@ export type ProjectRecord = {
   updatedAt: string;
 };
 
-export type DraftRecord = Omit<ProjectRecord, "updatedAt"> & {
+export type DraftRecord = {
+  id: "current";
+  projectId: string | null;
+  name: string;
+  entry: string;
+  runtimeId: "three";
+  files: ProjectFile[];
   activePath: string;
   saved: boolean;
 };
@@ -89,7 +95,7 @@ export async function getDraft(): Promise<DraftRecord | null> {
 export async function putDraft(draft: DraftRecord): Promise<void> {
   const database = await openDatabase();
   try {
-    await requestResult(database.transaction(DRAFT, "readwrite").objectStore(DRAFT).put({ ...draft, id: "current" }));
+    await requestResult(database.transaction(DRAFT, "readwrite").objectStore(DRAFT).put(draft));
   } finally {
     database.close();
   }

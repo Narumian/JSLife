@@ -366,7 +366,7 @@ export default function Playground() {
       setResolution({ width: viewport.width, height: viewport.height });
       setError(null);
       setSaved(false);
-      void putDraft({ id: activeProjectId ?? "draft", name: projectName, entry: "main.js", runtimeId: "three", files: projectFiles, activePath, saved });
+      void putDraft({ id: "current", projectId: activeProjectId, name: projectName, entry: "main.js", runtimeId: "three", files: projectFiles, activePath, saved });
       startTime.current = performance.now();
       lastFrame.current = startTime.current;
       frameCount.current = 0;
@@ -400,7 +400,7 @@ export default function Playground() {
           const legacyDraft = JSON.parse(localStorage.getItem(STORAGE_DRAFT) ?? "null") as LegacyDraft | null;
           if (legacyDraft?.code) {
             draft = {
-              id: legacyDraft.activeProjectId ?? "draft", name: legacyDraft.projectName || "Untitled sketch", entry: "main.js",
+              id: "current", projectId: legacyDraft.activeProjectId ?? null, name: legacyDraft.projectName || "Untitled sketch", entry: "main.js",
               runtimeId: "three", files: [mainFile(legacyDraft.code)], activePath: "main.js", saved: legacyDraft.saved ?? false,
             };
           }
@@ -414,7 +414,7 @@ export default function Playground() {
             setActivePath(restoredPath);
             setCode(restoredFile.content);
             setProjectName(draft.name || "Untitled sketch");
-            setActiveProjectId(draft.id === "draft" ? null : draft.id);
+            setActiveProjectId(draft.projectId);
             setSaved(draft.saved);
           }
         }
@@ -439,7 +439,7 @@ export default function Playground() {
   useEffect(() => {
     if (!draftReadyRef.current) return;
     const timer = window.setTimeout(() => {
-      void putDraft({ id: activeProjectId ?? "draft", name: projectName, entry: "main.js", runtimeId: "three", files: projectFiles, activePath, saved });
+      void putDraft({ id: "current", projectId: activeProjectId, name: projectName, entry: "main.js", runtimeId: "three", files: projectFiles, activePath, saved });
     }, 250);
     return () => window.clearTimeout(timer);
   }, [activePath, activeProjectId, projectFiles, projectName, saved]);
@@ -758,7 +758,11 @@ export default function Playground() {
     setFiles(next);
     const current = next.find((file) => file.path === activePath);
     if (current?.kind === "text") setCode(current.content);
-    else selectFile("main.js");
+    else {
+      const entryFile = next.find((file) => file.path === "main.js");
+      setActivePath("main.js");
+      if (entryFile?.kind === "text") setCode(entryFile.content);
+    }
     setSaved(false);
     if (!autoRun) window.setTimeout(() => runSource(next), 0);
   };

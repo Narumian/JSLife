@@ -35,13 +35,14 @@ export function dispose() {
 5. ウィンドウサイズの変化を `resize()`、再実行前のGPUリソース解放を `dispose()`へ通知するライフサイクルを実装。
 6. Neon Knot、Particle Current、Instanced Field の Three.js スターターを作成。
 7. Run、再生・一時停止、Auto-run、FPS、経過時間、実行エラー表示を追加。
-8. Saveで現在の名前とJSコードを `localStorage` のライブラリへ追加・更新できるようにした。
+8. Saveで仮想ファイル群とバイナリアセットをIndexedDBのライブラリへ追加・更新できるようにした。
 9. ライブラリ一覧からのロード・削除、ライブラリ全体のJSONバックアップと復元を追加。
 10. 単体 `.js` ファイルのImport・Export、Command/Ctrl + Enterで実行、Command/Ctrl + Sで保存を追加。
 11. PCの左右分割と、タブレット・スマートフォンの縦積みに対応。
 12. Codex SDKを使うローカルAIブリッジと、エディター内の相談・修正チャットを追加。
-13. AIが返す説明と完全なJS置換案を分け、ユーザーが確認してから適用・実行し、直前のコードへ戻せるようにした。
-14. 本番ビルドでTypeScriptとCloudflare Worker互換出力を検証。
+13. AIが返す説明と複数ファイルの書込み・削除・移動案を分け、ユーザーが確認してから適用・実行し、直前のファイル群へ戻せるようにした。
+14. 相対import、GLSL・JSONなどのテキストimport、`asset()`とアセットimport、`.jslife`パッケージのImport・Exportを追加。
+15. 本番ビルドでTypeScriptとCloudflare Worker互換出力を検証。
 
 ## Codexチャット
 
@@ -50,12 +51,12 @@ export function dispose() {
 1. 必要ならターミナルで `codex login` を実行し、ChatGPTアカウントでログインする。
 2. `npm run dev` を実行する。
 3. 画面上部または左レールの「Codex」を開く。
-4. 現在の `main.js` の説明、エラー診断、演出変更などを依頼する。
+4. 現在のプロジェクト全体の説明、エラー診断、演出変更などを依頼する。
 5. Auto-runがOFFで修正案が返った場合は「適用」を押す。適用前のコードは「元に戻す」で1段階復元できる。
 
 Auto-runがONの場合、Codexの完全なコード案は自動的にエディターへ適用され、同じ画面のままプレビューも更新される。返答待ちの間にコードが手作業で変わっていた場合は、競合する上書きを避けるため自動適用せず「適用」ボタンを表示する。Auto-runがOFFの場合も常に手動適用となる。
 
-会話履歴とCodexのthread IDはブラウザの `localStorage` に保存する。「＋」で新しい会話を開始できる。現在のJS、実行エラー、プロジェクト名は問い合わせ時にローカルブリッジへ渡され、その先のCodexサービスで処理される。
+会話履歴とCodexのthread IDはブラウザの `localStorage` に保存する。「＋」で新しい会話を開始できる。現在のテキストファイル、バイナリアセットの名前・MIME・サイズ、実行エラー、プロジェクト名は問い合わせ時にローカルブリッジへ渡される。バイナリアセット本体は送信しない。Codexは既存アセットを移動・削除できるが、新しいバイナリ生成は行わない。
 
 問い合わせ時には現在のWebGL Canvasも最大768pxのJPEGへ縮小キャプチャし、Codex SDKのローカル画像入力として添付する。これにより、ユーザーがスクリーンショットを手作業で送らなくても、右下チャットが構図、色、白飛び、Bloom、視認性などを実画像から評価できる。一時画像はリクエスト完了時に削除する。Canvasが取得できない場合はコードとエラーだけで相談を継続する。
 
@@ -68,7 +69,7 @@ Auto-runがONの場合、Codexの完全なコード案は自動的にエディ�
 Canvas 2D の `ctx` へ毎フレーム同じコード断片を渡す方式ではない。編集対象はJSモジュール全体であり、Runのたびに次の処理を行う。
 
 1. 現在のモジュールの `dispose()` を呼び、以前のDOMとGPUリソースを破棄。
-2. 新しいJSソースを一度評価し、Three.jsのシーンを構築。
+2. `main.js`から相対importされる仮想ファイルを解決し、Three.jsのシーンを構築。
 3. `resize()`へ描画領域とピクセル比を通知。
 4. 再生中は `frame({ time, delta, frame, pointer })` を毎フレーム実行。
 
@@ -76,13 +77,14 @@ Canvas 2D の `ctx` へ毎フレーム同じコード断片を渡す方式では
 
 ## ブラウザ内保存
 
-- 編集中のコード、プロジェクト名、開いている作品IDは変更のたびに端末の `localStorage` へ下書き保存し、リロード時に同じファイルを再実行する。
+- 編集中の仮想ファイル群、アセット、プロジェクト名、開いている作品IDは端末のIndexedDBへ下書き保存し、リロード時に同じ作品を再実行する。旧`localStorage`作品は初回に自動移行する。
 - Codexのチャット履歴と会話thread IDも `localStorage` からリロード後に復元する。
 - Codexパネルの開閉状態とAuto-run設定も端末設定として保存し、次回表示時に復元する。
 - Saveは新規作品を追加し、ロード済み作品の場合は同じIDを更新する。
-- JSON Exportはライブラリ全体のバックアップ、JSON Importはバックアップのマージに使用する。
+- JSON Exportはライブラリのテキストバックアップ、JSON Importはバックアップのマージに使用する。
 - `.js` Exportは現在のエディター内容だけを標準JavaScriptファイルとして出力する。
-- ブラウザデータの消去や別端末への移動に備え、重要な作品はJSONまたはJSでExportする必要がある。
+- `.jslife` Exportはmanifest、複数コード、シェーダー、画像・音声・モデルをZIPコンテナへまとめる。画像など圧縮済みアセットは無圧縮格納し、Import時に一度だけ展開してIndexedDBへ保存する。
+- ブラウザデータの消去や別端末への移動に備え、アセットを含む重要な作品は`.jslife`でExportする必要がある。
 
 ## p5.jsなどへの拡張方針
 
@@ -106,7 +108,10 @@ Codexブリッジはループバックアドレスだけで待ち受け、JSLIFE
 
 ## ファイル構成
 
-- `app/Playground.tsx`: JSモジュールランタイム、Three.js実行、保存・Import・Export、UI
+- `app/Playground.tsx`: 複数ファイル編集、Three.js実行、保存・Import・Export、チャットUI
+- `app/project-runtime.ts`: 相対import、テキスト・アセット解決、Three.jsライフサイクル
+- `app/project-store.ts`: IndexedDBによる作品・下書き保存
+- `app/jslife-package.ts`: `.jslife`パッケージの作成・展開
 - `app/page.tsx`: スタジオ画面のエントリー
 - `app/globals.css`: エディター、プレビュー、ライブラリのデザイン
 - `scripts/codex-bridge.mjs`: ローカルCodex認証を使うSSEチャットブリッジ
