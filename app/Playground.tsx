@@ -1230,7 +1230,17 @@ export default function Playground() {
   const pairCompanion = () => {
     const returnUrl = new URL(window.location.href);
     returnUrl.searchParams.delete("companion_token");
-    window.location.href = `jslife-companion://pair?return_url=${encodeURIComponent(returnUrl.toString())}`;
+    const userAgent = navigator.userAgent;
+    const browser = userAgent.includes("Edg/")
+      ? "edge"
+      : userAgent.includes("Firefox/")
+        ? "firefox"
+        : userAgent.includes("Chrome/") || userAgent.includes("CriOS/")
+          ? "chrome"
+          : userAgent.includes("Safari/")
+            ? "safari"
+            : "default";
+    window.location.href = `jslife-companion://pair?return_url=${encodeURIComponent(returnUrl.toString())}&browser=${browser}`;
   };
 
   return (

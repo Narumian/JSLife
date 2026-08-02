@@ -231,8 +231,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         queryItems.append(URLQueryItem(name: "companion_token", value: pairingToken))
         returnComponents.queryItems = queryItems
         guard let destination = returnComponents.url else { return }
-        NSWorkspace.shared.open(destination)
+        open(destination, in: components.queryItems?.first(where: { $0.name == "browser" })?.value)
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func open(_ destination: URL, in browser: String?) {
+        let bundleIdentifier: String?
+        switch browser {
+        case "chrome": bundleIdentifier = "com.google.Chrome"
+        case "edge": bundleIdentifier = "com.microsoft.edgemac"
+        case "firefox": bundleIdentifier = "org.mozilla.firefox"
+        case "safari": bundleIdentifier = "com.apple.Safari"
+        default: bundleIdentifier = nil
+        }
+
+        guard
+            let bundleIdentifier,
+            let applicationURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleIdentifier)
+        else {
+            NSWorkspace.shared.open(destination)
+            return
+        }
+
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = true
+        NSWorkspace.shared.open(
+            [destination],
+            withApplicationAt: applicationURL,
+            configuration: configuration
+        ) { _, error in
+            if error != nil {
+                NSWorkspace.shared.open(destination)
+            }
+        }
     }
 }
