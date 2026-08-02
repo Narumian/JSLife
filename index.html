@@ -10,6 +10,13 @@
   </head>
   <body>
     <div id="root"></div>
+    <script>
+      window.addEventListener("error", function (event) {
+        var root = document.getElementById("root");
+        if (!root || root.childElementCount) return;
+        root.innerHTML = '<main style="min-height:100vh;display:grid;place-items:center;padding:32px;background:#090c0e;color:#f2f4ed;font:14px system-ui"><div style="max-width:720px"><h1 style="color:#c8ff45">JSLIFE could not start</h1><pre style="white-space:pre-wrap;color:#ff967f">' + String(event.message || "Unknown startup error").replace(/[&<>]/g, function (value) { return {"&":"&amp;","<":"&lt;",">":"&gt;"}[value]; }) + '</pre></div></main>';
+      });
+    </script>
     <script type="module" src="/static/main.tsx"></script>
   </body>
 </html>

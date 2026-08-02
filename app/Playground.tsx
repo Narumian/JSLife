@@ -13,6 +13,9 @@ type ProjectBrowserRow = { path: string; name: string; depth: number; kind: "fol
 type FileAction = StoredChatFileAction;
 type ChatMessage = StoredChatMessage;
 type CodexResult = { message: string; action: "none" | "changes"; changes: FileAction[] };
+type LocalWorkspaceFile = { path: string; kind: "text"; mimeType: string; content: string } | { path: string; kind: "asset"; mimeType: string; base64: string };
+type LocalWorkspaceResponse = { workspaceId: string; name: string; folderName?: string; files: LocalWorkspaceFile[] };
+type ProjectGroup = { id: string; name: string; root: "browser" | "local"; parentId: string | null };
 
 const STORAGE_LIBRARY = "jslife-library-v1";
 const STORAGE_DRAFT = "jslife-three-draft-v1";
@@ -21,8 +24,49 @@ const STORAGE_THREAD = "jslife-codex-thread-v1";
 const STORAGE_ACTIVE_CHAT = "jslife-active-chat-v2";
 const STORAGE_COMPANION_TOKEN = "jslife-companion-token-v1";
 const STORAGE_PREFERENCES = "jslife-preferences-v1";
+const STORAGE_PROJECT_GROUPS = "jslife-project-groups-v1";
 const CODEX_BRIDGE = "http://127.0.0.1:4317";
+const APP_MODE = import.meta.env.VITE_JSLIFE_MODE || "local";
+const IS_STATIC_SHOWCASE = APP_MODE === "pages";
 const COMPANION_DOWNLOAD_URL = import.meta.env.VITE_COMPANION_DOWNLOAD_URL || "";
+const RELEASE_URL = "https://github.com/Narumian/JSLife/releases/latest";
+const RELEASE_DOWNLOAD_URL = "https://github.com/Narumian/JSLife/releases/latest/download/JSLIFE.dmg";
+const REPOSITORY_URL = "https://github.com/Narumian/JSLife";
+
+const activeChatStorageKey = (projectId: string | null) => `${STORAGE_ACTIVE_CHAT}:${projectId ?? "unscoped"}`;
+const formatProjectTimestamp = (value: string) => {
+  const date = new Date(value);
+  const time = `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+  return `${date.toLocaleDateString()} ${time}`;
+};
+
+const initialProjectGroups = (): ProjectGroup[] => {
+  if (typeof window === "undefined") return [];
+  try {
+    const parsed = JSON.parse(localStorage.getItem(STORAGE_PROJECT_GROUPS) || "[]") as ProjectGroup[];
+    return Array.isArray(parsed) ? parsed.filter((group) => group && typeof group.id === "string" && typeof group.name === "string" && (group.root === "browser" || group.root === "local")) : [];
+  } catch { return []; }
+};
+
+const localWorkspaceFiles = (workspace: LocalWorkspaceResponse): ProjectFile[] => workspace.files.map((file) => file.kind === "text"
+  ? file
+  : { path: file.path, kind: "asset", mimeType: file.mimeType, content: new Blob([Uint8Array.from(atob(file.base64), (character) => character.charCodeAt(0))], { type: file.mimeType }) });
+
+const blobBase64 = (blob: Blob) => new Promise<string>((resolve, reject) => {
+  const reader = new FileReader();
+  reader.onload = () => resolve(String(reader.result).split(",", 2)[1] || "");
+  reader.onerror = () => reject(reader.error ?? new Error("Could not read asset"));
+  reader.readAsDataURL(blob);
+});
+
+const serializeWorkspaceFiles = (files: ProjectFile[]) => Promise.all(files.map(async (file) => file.kind === "text"
+  ? { path: file.path, kind: file.kind, mimeType: file.mimeType, content: file.content }
+  : { path: file.path, kind: file.kind, mimeType: file.mimeType, base64: await blobBase64(file.content) }));
+
+const sameProjectFile = (left: ProjectFile | undefined, right: ProjectFile) => Boolean(left
+  && left.kind === right.kind
+  && left.mimeType === right.mimeType
+  && (left.kind === "text" && right.kind === "text" ? left.content === right.content : left.kind === "asset" && right.kind === "asset" && left.content === right.content));
 
 const PRESETS: Preset[] = [
   {
@@ -302,6 +346,8 @@ export default function Playground() {
   const [presetIndex, setPresetIndex] = useState(0);
   const [projectName, setProjectName] = useState(PRESETS[0].name);
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
+  const [workspaceId, setWorkspaceId] = useState<string | null>(null);
+  const [workspaceName, setWorkspaceName] = useState<string | null>(null);
   const [code, setCode] = useState(PRESETS[0].code);
   const [files, setFiles] = useState<ProjectFile[]>([mainFile(PRESETS[0].code)]);
   const [activePath, setActivePath] = useState("main.js");
@@ -311,6 +357,9 @@ export default function Playground() {
   const [sidebarMode, setSidebarMode] = useState<"files" | "library">("files");
   const [selectedProjectKey, setSelectedProjectKey] = useState("workspace");
   const [previewCollapsedFolders, setPreviewCollapsedFolders] = useState<Set<string>>(new Set());
+  const [collapsedProjectGroups, setCollapsedProjectGroups] = useState<Set<string>>(new Set());
+  const [projectGroups, setProjectGroups] = useState<ProjectGroup[]>(initialProjectGroups);
+  const [projectTreeMenu, setProjectTreeMenu] = useState<{ x: number; y: number; root: "browser" | "local"; parentId: string | null } | null>(null);
   const [codeSearchOpen, setCodeSearchOpen] = useState(false);
   const [codeSearchQuery, setCodeSearchQuery] = useState("");
   const [codeSearchIndex, setCodeSearchIndex] = useState(0);
@@ -335,6 +384,7 @@ export default function Playground() {
   const [chatProgress, setChatProgress] = useState("");
   const [codexThreadId, setCodexThreadId] = useState<string | null>(null);
   const [undoFiles, setUndoFiles] = useState<ProjectFile[] | null>(null);
+  const [fileBrowserMenu, setFileBrowserMenu] = useState<{ x: number; y: number } | null>(null);
   const mountRef = useRef<HTMLDivElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
   const runtimeRef = useRef<GraphicsRuntime | null>(null);
@@ -350,6 +400,9 @@ export default function Playground() {
   const sizeRef = useRef({ width: 0, height: 0, pixelRatio: 1 });
   const chatEndRef = useRef<HTMLDivElement>(null);
   const chatConversationsRef = useRef<ChatConversationRecord[]>([]);
+  const chatProjectIdRef = useRef<string | null>(null);
+  const workspaceFilesRef = useRef<ProjectFile[]>([]);
+  const hydratedWorkspaceRef = useRef<string | null>(null);
   const draftReadyRef = useRef(false);
   const preferencesReadyRef = useRef(false);
   const conversationsReadyRef = useRef(false);
@@ -360,16 +413,21 @@ export default function Playground() {
   const lines = useMemo(() => code.split("\n").length, [code]);
   const projectFiles = useMemo(() => files.map((file) => file.path === activePath && file.kind === "text" ? { ...file, content: code } : file), [activePath, code, files]);
   const projectBrowserRows = useMemo(() => buildProjectBrowserRows(projectFiles, collapsedFolders), [collapsedFolders, projectFiles]);
+  const visibleLibrary = useMemo(
+    () => library.filter((project) => !(workspaceId && project.id === activeProjectId)),
+    [activeProjectId, library, workspaceId],
+  );
+  const showWorkspaceInExplorer = Boolean(workspaceId || selectedProjectKey === "workspace");
   const projectSelectionKeys = useMemo(() => [
-    "workspace",
-    ...library.map((project) => `saved:${project.id}`),
+    ...(showWorkspaceInExplorer ? ["workspace"] : []),
+    ...visibleLibrary.map((project) => `saved:${project.id}`),
     "starter:blank",
     ...PRESETS.map((_preset, index) => `starter:${index}`),
-  ], [library]);
+  ], [showWorkspaceInExplorer, visibleLibrary]);
   const selectedProject = useMemo(() => {
     if (selectedProjectKey.startsWith("saved:")) {
       const project = library.find((candidate) => `saved:${candidate.id}` === selectedProjectKey);
-      if (project) return { name: project.name, files: project.files, detail: `Saved ${new Date(project.updatedAt).toLocaleDateString()}` };
+      if (project) return { name: project.name, files: project.files, detail: `Saved ${formatProjectTimestamp(project.updatedAt)}` };
     }
     if (selectedProjectKey === "starter:blank") return { name: "Blank Three.js", files: [mainFile(BLANK_PROJECT)], detail: "Starter · Three.js" };
     if (selectedProjectKey.startsWith("starter:")) {
@@ -385,10 +443,15 @@ export default function Playground() {
   const openFiles = useMemo(() => openPaths.map((path) => projectFiles.find((file) => file.path === path && file.kind === "text")).filter((file): file is ProjectFile & { kind: "text" } => Boolean(file)), [openPaths, projectFiles]);
   const codeSearchMatches = useMemo(() => findCodeMatches(code, codeSearchQuery), [code, codeSearchQuery]);
   const activeCodeSearchIndex = codeSearchMatches.length ? codeSearchIndex % codeSearchMatches.length : 0;
+  const projectChatConversations = useMemo(
+    () => chatConversations.filter((conversation) => conversation.projectId === activeProjectId),
+    [activeProjectId, chatConversations],
+  );
 
   useEffect(() => { codeRef.current = code; }, [code]);
   useEffect(() => { autoRunRef.current = autoRun; }, [autoRun]);
   useEffect(() => { chatConversationsRef.current = chatConversations; }, [chatConversations]);
+  useEffect(() => { localStorage.setItem(STORAGE_PROJECT_GROUPS, JSON.stringify(projectGroups)); }, [projectGroups]);
   useEffect(() => {
     const url = new URL(window.location.href);
     const pairedToken = url.searchParams.get("companion_token");
@@ -480,7 +543,7 @@ export default function Playground() {
       setResolution({ width: viewport.width, height: viewport.height });
       setError(null);
       setSaved(false);
-      void putDraft({ id: "current", projectId: activeProjectId, name: projectName, entry: "main.js", runtimeId: "three", files: projectFiles, activePath, saved });
+      void putDraft({ id: "current", projectId: activeProjectId, name: projectName, entry: "main.js", runtimeId: "three", files: projectFiles, activePath, saved, workspaceId, workspaceName });
       startTime.current = performance.now();
       lastFrame.current = startTime.current;
       frameCount.current = 0;
@@ -491,7 +554,7 @@ export default function Playground() {
       setError(caught instanceof Error ? caught.message : "Unknown module error");
       setRunning(false);
     }
-  }, [activePath, activeProjectId, currentViewport, projectFiles, projectName, saved, teardown]);
+  }, [activePath, activeProjectId, currentViewport, projectFiles, projectName, saved, teardown, workspaceId, workspaceName]);
 
   useEffect(() => {
     let cancelled = false;
@@ -519,6 +582,7 @@ export default function Playground() {
             };
           }
         }
+        const restoredProjectId = draft?.projectId ?? crypto.randomUUID();
         if (draft?.files.length) {
           sourceToRestore = draft.files;
           const restoredPath = draft.files.some((file) => file.path === draft.activePath && file.kind === "text") ? draft.activePath : draft.entry;
@@ -529,36 +593,54 @@ export default function Playground() {
             setOpenPaths([restoredPath]);
             setCode(restoredFile.content);
             setProjectName(draft.name || "Untitled sketch");
-            setActiveProjectId(draft.projectId);
+            setActiveProjectId(restoredProjectId);
+            setWorkspaceId(draft.workspaceId ?? null);
+            setWorkspaceName(draft.workspaceName ?? null);
+            workspaceFilesRef.current = draft.workspaceId ? draft.files : [];
             setSaved(draft.saved);
           }
+        } else if (!cancelled) {
+          setActiveProjectId(restoredProjectId);
         }
         const legacyMessages = JSON.parse(localStorage.getItem(STORAGE_CHAT) ?? "[]") as ChatMessage[];
         const legacyThreadId = localStorage.getItem(STORAGE_THREAD);
         let conversations = await listChatConversations();
-        if (!conversations.length) {
+        const unscopedConversations = conversations.filter((conversation) => conversation.projectId === null);
+        if (unscopedConversations.length) {
+          const migratedConversations = unscopedConversations.map((conversation) => ({
+            ...conversation,
+            projectId: restoredProjectId,
+            projectName: draft?.name || conversation.projectName || PRESETS[0].name,
+          }));
+          await Promise.all(migratedConversations.map(putChatConversation));
+          conversations = conversations.map((conversation) => migratedConversations.find((migrated) => migrated.id === conversation.id) ?? conversation);
+        }
+        let projectConversations = conversations.filter((conversation) => conversation.projectId === restoredProjectId);
+        if (!projectConversations.length) {
           const now = new Date().toISOString();
           const migrated: ChatConversationRecord = {
             id: crypto.randomUUID(),
             title: chatTitle(Array.isArray(legacyMessages) ? legacyMessages : []),
             threadId: legacyThreadId,
-            projectId: draft?.projectId ?? null,
+            projectId: restoredProjectId,
             projectName: draft?.name || PRESETS[0].name,
             messages: Array.isArray(legacyMessages) ? legacyMessages : [],
             createdAt: now,
             updatedAt: now,
           };
           await putChatConversation(migrated);
-          conversations = [migrated];
+          conversations = [migrated, ...conversations];
+          projectConversations = [migrated];
         }
-        const storedActiveId = localStorage.getItem(STORAGE_ACTIVE_CHAT);
-        const activeConversation = conversations.find((conversation) => conversation.id === storedActiveId) ?? conversations[0];
+        const storedActiveId = localStorage.getItem(activeChatStorageKey(restoredProjectId)) ?? localStorage.getItem(STORAGE_ACTIVE_CHAT);
+        const activeConversation = projectConversations.find((conversation) => conversation.id === storedActiveId) ?? projectConversations[0];
         if (!cancelled && activeConversation) {
           setChatConversations(conversations);
           setActiveConversationId(activeConversation.id);
           setChatMessages(activeConversation.messages);
           setCodexThreadId(activeConversation.threadId);
-          localStorage.setItem(STORAGE_ACTIVE_CHAT, activeConversation.id);
+          localStorage.setItem(activeChatStorageKey(restoredProjectId), activeConversation.id);
+          chatProjectIdRef.current = restoredProjectId;
           conversationsReadyRef.current = true;
         }
         const preferences = JSON.parse(localStorage.getItem(STORAGE_PREFERENCES) ?? "{}") as StudioPreferences;
@@ -584,10 +666,76 @@ export default function Playground() {
   useEffect(() => {
     if (!draftReadyRef.current) return;
     const timer = window.setTimeout(() => {
-      void putDraft({ id: "current", projectId: activeProjectId, name: projectName, entry: "main.js", runtimeId: "three", files: projectFiles, activePath, saved });
+      void putDraft({ id: "current", projectId: activeProjectId, name: projectName, entry: "main.js", runtimeId: "three", files: projectFiles, activePath, saved, workspaceId, workspaceName });
     }, 250);
     return () => window.clearTimeout(timer);
-  }, [activePath, activeProjectId, projectFiles, projectName, saved]);
+  }, [activePath, activeProjectId, projectFiles, projectName, saved, workspaceId, workspaceName]);
+
+  useEffect(() => {
+    if (!draftReadyRef.current || !workspaceId) return;
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        const previous = workspaceFilesRef.current;
+        const previousByPath = new Map(previous.map((file) => [file.path, file]));
+        const currentPaths = new Set(projectFiles.map((file) => file.path));
+        const changed = projectFiles.filter((file) => !sameProjectFile(previousByPath.get(file.path), file));
+        const removedPaths = previous.filter((file) => !currentPaths.has(file.path)).map((file) => file.path);
+        if (!changed.length && !removedPaths.length) return;
+        try {
+          const serialized = await serializeWorkspaceFiles(changed);
+          const response = await fetch(`${CODEX_BRIDGE}/workspaces/${workspaceId}/sync`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              ...(companionToken ? { "X-JSLIFE-Companion-Token": companionToken } : {}),
+            },
+            body: JSON.stringify({ files: serialized, removedPaths }),
+          });
+          if (!response.ok) {
+            const body = await response.json().catch(() => ({})) as { error?: string };
+            throw new Error(body.error || `Companion returned ${response.status}`);
+          }
+          if (cancelled) return;
+          workspaceFilesRef.current = projectFiles;
+          setSaved(true);
+        } catch (caught) {
+          if (!cancelled) setError(`Local save failed: ${caught instanceof Error ? caught.message : "Companion is unavailable"}`);
+        }
+      })();
+    }, 350);
+    return () => { cancelled = true; window.clearTimeout(timer); };
+  }, [companionToken, projectFiles, workspaceId]);
+
+  useEffect(() => {
+    if (!draftReadyRef.current || !workspaceId || hydratedWorkspaceRef.current === workspaceId) return;
+    hydratedWorkspaceRef.current = workspaceId;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const response = await fetch(`${CODEX_BRIDGE}/workspaces/${workspaceId}`, {
+          headers: companionToken ? { "X-JSLIFE-Companion-Token": companionToken } : undefined,
+        });
+        if (!response.ok) return;
+        const workspace = await response.json() as LocalWorkspaceResponse;
+        const nextFiles = localWorkspaceFiles(workspace);
+        const entryFile = nextFiles.find((file) => file.path === "main.js" && file.kind === "text");
+        if (cancelled || !entryFile || entryFile.kind !== "text") return;
+        workspaceFilesRef.current = nextFiles;
+        setFiles(nextFiles);
+        setWorkspaceName(workspace.folderName ?? workspace.name);
+        setProjectName(workspace.name);
+        const nextActivePath = nextFiles.some((file) => file.path === activePath && file.kind === "text") ? activePath : "main.js";
+        const activeFile = nextFiles.find((file) => file.path === nextActivePath);
+        setActivePath(nextActivePath);
+        setOpenPaths((current) => current.filter((path) => nextFiles.some((file) => file.path === path && file.kind === "text")));
+        if (activeFile?.kind === "text") setCode(activeFile.content);
+        setSaved(true);
+        runSource(nextFiles);
+      } catch { /* keep the IndexedDB draft when Companion is offline */ }
+    })();
+    return () => { cancelled = true; };
+  }, [activePath, companionToken, runSource, workspaceId]);
 
   useEffect(() => {
     if (!preferencesReadyRef.current) return;
@@ -601,6 +749,7 @@ export default function Playground() {
       if (!existing) return;
       const updated: ChatConversationRecord = {
         ...existing,
+        projectName,
         title: chatTitle(chatMessages),
         threadId: codexThreadId,
         messages: chatMessages,
@@ -610,12 +759,50 @@ export default function Playground() {
       chatConversationsRef.current = next;
       setChatConversations(next);
       void putChatConversation(updated);
-      localStorage.setItem(STORAGE_ACTIVE_CHAT, activeConversationId);
+      localStorage.setItem(activeChatStorageKey(existing.projectId), activeConversationId);
     }, 180);
     return () => window.clearTimeout(timer);
-  }, [activeConversationId, chatMessages, codexThreadId]);
+  }, [activeConversationId, chatMessages, codexThreadId, projectName]);
+
+  useEffect(() => {
+    if (!conversationsReadyRef.current || !activeProjectId || chatProjectIdRef.current === activeProjectId) return;
+    chatProjectIdRef.current = activeProjectId;
+    const projectConversations = chatConversationsRef.current.filter((conversation) => conversation.projectId === activeProjectId);
+    const storedActiveId = localStorage.getItem(activeChatStorageKey(activeProjectId));
+    const activeConversation = projectConversations.find((conversation) => conversation.id === storedActiveId) ?? projectConversations[0];
+    if (activeConversation) {
+      setActiveConversationId(activeConversation.id);
+      setChatMessages(activeConversation.messages);
+      setCodexThreadId(activeConversation.threadId);
+      localStorage.setItem(activeChatStorageKey(activeProjectId), activeConversation.id);
+      return;
+    }
+    const now = new Date().toISOString();
+    const conversation: ChatConversationRecord = {
+      id: crypto.randomUUID(),
+      title: "新しい会話",
+      threadId: null,
+      projectId: activeProjectId,
+      projectName,
+      messages: [],
+      createdAt: now,
+      updatedAt: now,
+    };
+    const next = [conversation, ...chatConversationsRef.current];
+    chatConversationsRef.current = next;
+    setChatConversations(next);
+    setActiveConversationId(conversation.id);
+    setChatMessages([]);
+    setCodexThreadId(null);
+    localStorage.setItem(activeChatStorageKey(activeProjectId), conversation.id);
+    void putChatConversation(conversation);
+  }, [activeProjectId, projectName]);
 
   const checkCodex = useCallback(async () => {
+    if (IS_STATIC_SHOWCASE) {
+      setChatOnline(false);
+      return;
+    }
     setChatOnline(null);
     try {
       const response = await fetch(`${CODEX_BRIDGE}/health`, {
@@ -701,9 +888,14 @@ export default function Playground() {
     setSaved(true);
   };
 
-  const loadProject = (project: ProjectRecord) => {
+  const loadProject = (project: ProjectRecord, stayInProjectBrowser = false) => {
     const entryFile = project.files.find((file) => file.path === project.entry);
     if (!entryFile || entryFile.kind !== "text") return;
+    saveCurrentConversation();
+    setWorkspaceId(null);
+    setWorkspaceName(null);
+    workspaceFilesRef.current = [];
+    hydratedWorkspaceRef.current = null;
     setProjectName(project.name);
     setFiles(project.files);
     setActivePath(project.entry);
@@ -712,7 +904,7 @@ export default function Playground() {
     setActiveProjectId(project.id);
     setSelectedProjectKey(`saved:${project.id}`);
     setSaved(true);
-    setSidebarMode("files");
+    if (!stayInProjectBrowser) setSidebarMode("files");
     window.setTimeout(() => runSource(project.files, project.entry), 0);
   };
 
@@ -822,38 +1014,173 @@ export default function Playground() {
     setCodeSearchIndex((index) => (index + direction + codeSearchMatches.length) % codeSearchMatches.length);
   };
 
-  const choosePreset = (index: number) => {
+  const choosePreset = (index: number, stayInProjectBrowser = false) => {
     const preset = PRESETS[index];
     const nextFiles = [mainFile(preset.code)];
+    saveCurrentConversation();
+    setWorkspaceId(null);
+    setWorkspaceName(null);
+    workspaceFilesRef.current = [];
+    hydratedWorkspaceRef.current = null;
     setPresetIndex(index);
     setProjectName(preset.name);
     setFiles(nextFiles);
     setActivePath("main.js");
     setOpenPaths(["main.js"]);
     setCode(preset.code);
-    setActiveProjectId(null);
+    setActiveProjectId(crypto.randomUUID());
     setSelectedProjectKey(`starter:${index}`);
     setSaved(false);
-    setSidebarMode("files");
+    if (!stayInProjectBrowser) setSidebarMode("files");
     runSource(nextFiles);
   };
 
-  const createBlankProject = () => {
+  const createBlankProject = (stayInProjectBrowser = false) => {
     if (!saved && !window.confirm("Discard the current unsaved changes and create a blank project?")) return;
     const nextFiles = [mainFile(BLANK_PROJECT)];
+    saveCurrentConversation();
+    setWorkspaceId(null);
+    setWorkspaceName(null);
+    workspaceFilesRef.current = [];
+    hydratedWorkspaceRef.current = null;
     setPresetIndex(0);
     setProjectName("Untitled Project");
     setFiles(nextFiles);
     setActivePath("main.js");
     setOpenPaths(["main.js"]);
     setCode(BLANK_PROJECT);
-    setActiveProjectId(null);
+    setActiveProjectId(crypto.randomUUID());
     setSelectedProjectKey("starter:blank");
     setUndoFiles(null);
     setSaved(false);
-    setSidebarMode("files");
+    if (!stayInProjectBrowser) setSidebarMode("files");
     runSource(nextFiles);
   };
+
+  const openLocalWorkspace = async () => {
+    if (IS_STATIC_SHOWCASE) {
+      setChatOpen(true);
+      return;
+    }
+    try {
+      const response = await fetch(`${CODEX_BRIDGE}/workspaces/open`, {
+        method: "POST",
+        headers: companionToken ? { "X-JSLIFE-Companion-Token": companionToken } : undefined,
+      });
+      const body = await response.json() as LocalWorkspaceResponse & { error?: string };
+      if (!response.ok) {
+        if (response.status === 409) return;
+        throw new Error(body.error || `Companion returned ${response.status}`);
+      }
+      const nextFiles = localWorkspaceFiles(body);
+      const entryFile = nextFiles.find((file) => file.path === "main.js" && file.kind === "text");
+      if (!entryFile || entryFile.kind !== "text") throw new Error("Selected folder needs a text main.js file");
+      saveCurrentConversation();
+      workspaceFilesRef.current = nextFiles;
+      hydratedWorkspaceRef.current = body.workspaceId;
+      setWorkspaceId(body.workspaceId);
+      setWorkspaceName(body.folderName ?? body.name);
+      setProjectName(body.name);
+      setFiles(nextFiles);
+      setActivePath("main.js");
+      setOpenPaths(["main.js"]);
+      setCode(entryFile.content);
+      setActiveProjectId(`local:${body.workspaceId}`);
+      setSelectedProjectKey("workspace");
+      setUndoFiles(null);
+      setSaved(true);
+      setSidebarMode("files");
+      runSource(nextFiles);
+      setError(null);
+    } catch (caught) {
+      setError(`Could not open local folder: ${caught instanceof Error ? caught.message : "Companion is unavailable"}`);
+    }
+  };
+
+  const moveToLocalWorkspace = async () => {
+    if (IS_STATIC_SHOWCASE || workspaceId) return;
+    const confirmed = window.confirm("Move this project to ~/Library/Application Support/JSLIFE/Projects/? The browser-saved version will be kept as a backup.");
+    if (!confirmed) return;
+    try {
+      const serialized = await serializeWorkspaceFiles(projectFiles);
+      const response = await fetch(`${CODEX_BRIDGE}/workspaces/move`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(companionToken ? { "X-JSLIFE-Companion-Token": companionToken } : {}),
+        },
+        body: JSON.stringify({ projectName, files: serialized }),
+      });
+      const body = await response.json() as LocalWorkspaceResponse & { error?: string };
+      if (!response.ok) {
+        if (response.status === 409) return;
+        throw new Error(body.error || `Desktop service returned ${response.status}`);
+      }
+      const nextFiles = localWorkspaceFiles(body);
+      const entryFile = nextFiles.find((file) => file.path === "main.js" && file.kind === "text");
+      if (!entryFile || entryFile.kind !== "text") throw new Error("The selected folder could not be opened as a JSLIFE project");
+
+      const now = new Date().toISOString();
+      const backupId = activeProjectId ?? crypto.randomUUID();
+      const backup: ProjectRecord = {
+        id: backupId,
+        name: projectName.trim() || "Untitled sketch",
+        entry: "main.js",
+        runtimeId: "three",
+        files: projectFiles,
+        updatedAt: now,
+      };
+      await putProject(backup);
+      setLibrary((current) => [backup, ...current.filter((project) => project.id !== backupId)]);
+      workspaceFilesRef.current = nextFiles;
+      hydratedWorkspaceRef.current = body.workspaceId;
+      setWorkspaceId(body.workspaceId);
+      setWorkspaceName(body.folderName ?? body.name);
+      setProjectName(body.name);
+      setFiles(nextFiles);
+      setActivePath("main.js");
+      setOpenPaths(["main.js"]);
+      setCode(entryFile.content);
+      setActiveProjectId(backupId);
+      setSelectedProjectKey("workspace");
+      setUndoFiles(null);
+      setSaved(true);
+      setSidebarMode("files");
+      runSource(nextFiles);
+      setError(null);
+    } catch (caught) {
+      setError(`Could not move project: ${caught instanceof Error ? caught.message : "Desktop service is unavailable"}`);
+    }
+  };
+
+  const revealLocalWorkspace = async () => {
+    if (!workspaceId) return;
+    setFileBrowserMenu(null);
+    try {
+      const response = await fetch(`${CODEX_BRIDGE}/workspaces/${workspaceId}/reveal`, {
+        method: "POST",
+        headers: companionToken ? { "X-JSLIFE-Companion-Token": companionToken } : undefined,
+      });
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({})) as { error?: string };
+        throw new Error(body.error || `Desktop service returned ${response.status}`);
+      }
+    } catch (caught) {
+      setError(`Could not open Finder: ${caught instanceof Error ? caught.message : "Desktop service is unavailable"}`);
+    }
+  };
+
+  useEffect(() => {
+    if (!fileBrowserMenu && !projectTreeMenu) return;
+    const closeMenu = () => { setFileBrowserMenu(null); setProjectTreeMenu(null); };
+    const closeOnEscape = (event: KeyboardEvent) => { if (event.key === "Escape") closeMenu(); };
+    window.addEventListener("pointerdown", closeMenu);
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      window.removeEventListener("pointerdown", closeMenu);
+      window.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [fileBrowserMenu, projectTreeMenu]);
 
   const openProjectBrowser = () => {
     setSidebarMode("library");
@@ -862,21 +1189,20 @@ export default function Playground() {
 
   const activateProjectSelection = (key = selectedProjectKey) => {
     if (key === "workspace") {
-      setSidebarMode("files");
       return;
     }
     if (key.startsWith("saved:")) {
       const project = library.find((candidate) => `saved:${candidate.id}` === key);
-      if (project) loadProject(project);
+      if (project) loadProject(project, true);
       return;
     }
     if (key === "starter:blank") {
-      createBlankProject();
+      createBlankProject(true);
       return;
     }
     if (key.startsWith("starter:")) {
       const index = Number(key.slice("starter:".length));
-      if (PRESETS[index]) choosePreset(index);
+      if (PRESETS[index]) choosePreset(index, true);
     }
   };
 
@@ -892,6 +1218,86 @@ export default function Playground() {
     const direction = event.key === "ArrowDown" ? 1 : -1;
     const nextIndex = Math.min(projectSelectionKeys.length - 1, Math.max(0, currentIndex + direction));
     setSelectedProjectKey(projectSelectionKeys[nextIndex]);
+  };
+
+  const selectExplorerProject = (key: string) => {
+    setSelectedProjectKey(key);
+    setPreviewCollapsedFolders(new Set());
+  };
+
+  const toggleProjectGroup = (group: string) => setCollapsedProjectGroups((current) => {
+    const next = new Set(current);
+    if (next.has(group)) next.delete(group); else next.add(group);
+    return next;
+  });
+
+  const openProjectGroupMenu = (event: React.MouseEvent, root: "browser" | "local", parentId: string | null) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setProjectTreeMenu({
+      x: Math.min(event.clientX, window.innerWidth - 190),
+      y: Math.min(event.clientY, window.innerHeight - 48),
+      root,
+      parentId,
+    });
+  };
+
+  const addProjectGroup = () => {
+    if (!projectTreeMenu) return;
+    const name = window.prompt("Group name");
+    if (!name?.trim()) return;
+    const group: ProjectGroup = {
+      id: crypto.randomUUID(),
+      name: name.trim(),
+      root: projectTreeMenu.root,
+      parentId: projectTreeMenu.parentId,
+    };
+    setProjectGroups((current) => [...current, group]);
+    if (group.parentId) setCollapsedProjectGroups((current) => {
+      const next = new Set(current);
+      next.delete(`group:${group.parentId}`);
+      return next;
+    });
+    setCollapsedProjectGroups((current) => {
+      const next = new Set(current);
+      next.delete(group.root);
+      return next;
+    });
+    setProjectTreeMenu(null);
+  };
+
+  const renderProjectGroupFolders = (root: "browser" | "local", parentId: string | null, depth = 1): React.ReactNode => projectGroups
+    .filter((group) => group.root === root && group.parentId === parentId)
+    .map((group) => {
+      const collapseKey = `group:${group.id}`;
+      const collapsed = collapsedProjectGroups.has(collapseKey);
+      const childCount = projectGroups.filter((candidate) => candidate.parentId === group.id).length;
+      return <div className="project-tree-folder-node" key={group.id}>
+        <button
+          className="project-tree-folder"
+          style={{ paddingLeft: 9 + depth * 13 }}
+          onClick={() => toggleProjectGroup(collapseKey)}
+          onContextMenu={(event) => openProjectGroupMenu(event, root, group.id)}
+        ><span>{collapsed ? "▸" : "▾"}</span><i>▱</i><strong>{group.name}</strong>{childCount > 0 && <small>{childCount}</small>}</button>
+        {!collapsed && renderProjectGroupFolders(root, group.id, depth + 1)}
+      </div>;
+    });
+
+  const renderExplorerProject = (
+    key: string,
+    name: string,
+    detail: string,
+    options?: { accent?: string; blank?: boolean; loaded?: boolean; package?: boolean; onDelete?: () => void },
+  ) => {
+    return <div className={`project-explorer-entry${selectedProjectKey === key ? " project-explorer-selected" : ""}${options?.loaded ? " project-explorer-loaded" : ""}`} key={key}>
+      <div className="project-explorer-project">
+        <button id={`project-${key.replace(/[^a-z0-9_-]/gi, "-")}`} role="option" aria-selected={selectedProjectKey === key} className="project-explorer-select" onClick={() => selectExplorerProject(key)} onDoubleClick={() => activateProjectSelection(key)}>
+          <i className={options?.blank ? "project-explorer-blank" : options?.package ? "project-explorer-package" : ""} style={{ "--swatch": options?.accent ?? "var(--purple)" } as React.CSSProperties}>{options?.blank ? "＋" : options?.package ? "J" : "▱"}</i>
+          <span><strong>{name}{options?.package && !name.endsWith(".jslife") ? ".jslife" : ""}</strong><small>{detail}</small></span>
+        </button>
+        {options?.onDelete && <button className="project-explorer-delete" onClick={options.onDelete} aria-label={`Delete ${name}`} title="Delete">×</button>}
+      </div>
+    </div>;
   };
 
   const toggleRunning = () => {
@@ -950,12 +1356,17 @@ export default function Playground() {
       } else {
         const text = await file.text();
         const nextFiles = [mainFile(text)];
+        saveCurrentConversation();
+        setWorkspaceId(null);
+        setWorkspaceName(null);
+        workspaceFilesRef.current = [];
+        hydratedWorkspaceRef.current = null;
         setProjectName(file.name.replace(/\.js$/i, ""));
         setFiles(nextFiles);
         setActivePath("main.js");
         setOpenPaths(["main.js"]);
         setCode(text);
-        setActiveProjectId(null);
+        setActiveProjectId(crypto.randomUUID());
         setSaved(false);
         runSource(nextFiles);
       }
@@ -1181,6 +1592,7 @@ export default function Playground() {
     if (!existing) return;
     const updated: ChatConversationRecord = {
       ...existing,
+      projectName,
       title: chatTitle(chatMessages),
       threadId: codexThreadId,
       messages: chatMessages,
@@ -1213,18 +1625,18 @@ export default function Playground() {
     setChatMessages([]);
     setCodexThreadId(null);
     setChatHistoryOpen(false);
-    localStorage.setItem(STORAGE_ACTIVE_CHAT, conversation.id);
+    localStorage.setItem(activeChatStorageKey(activeProjectId), conversation.id);
     void putChatConversation(conversation);
   };
 
   const selectChatConversation = (conversation: ChatConversationRecord) => {
-    if (chatBusy || conversation.id === activeConversationId) return;
+    if (chatBusy || conversation.projectId !== activeProjectId || conversation.id === activeConversationId) return;
     saveCurrentConversation();
     setActiveConversationId(conversation.id);
     setChatMessages(conversation.messages);
     setCodexThreadId(conversation.threadId);
     setChatHistoryOpen(false);
-    localStorage.setItem(STORAGE_ACTIVE_CHAT, conversation.id);
+    localStorage.setItem(activeChatStorageKey(activeProjectId), conversation.id);
   };
 
   const pairCompanion = () => {
@@ -1244,24 +1656,24 @@ export default function Playground() {
   };
 
   return (
-    <main className={`studio ${chatOpen ? "chat-open" : ""} ${editorOpen ? "" : "editor-closed"} ${sidebarMode === "library" ? "sidebar-library" : ""}`}>
+    <main className={`studio mode-${APP_MODE} ${chatOpen ? "chat-open" : ""} ${editorOpen ? "" : "editor-closed"} ${sidebarMode === "library" ? "sidebar-library" : ""}`}>
       <input ref={importRef} className="visually-hidden" type="file" accept=".js,.json,.jslife,text/javascript,application/json,application/x-jslife-project" onChange={importFile} />
       <input ref={assetRef} className="visually-hidden" type="file" multiple onChange={addAssets} />
       <header className="topbar">
         <div className="brand"><span className="brand-mark">J</span><span>JSLIFE</span></div>
-        <nav className="main-nav" aria-label="Main navigation"><button className={!chatOpen && sidebarMode === "files" ? "nav-active" : ""} onClick={() => { setChatOpen(false); setSidebarMode("files"); setEditorOpen(true); }}>Studio</button><button className={sidebarMode === "library" ? "nav-active" : ""} onClick={openProjectBrowser}>Library</button><button className={chatOpen ? "nav-active" : ""} onClick={() => setChatOpen(true)}>Codex</button></nav>
+        <nav className="main-nav" aria-label="Main navigation"><button className={!chatOpen && sidebarMode === "files" ? "nav-active" : ""} onClick={() => { setChatOpen(false); setSidebarMode("files"); setEditorOpen(true); }}>Studio</button><button className={sidebarMode === "library" ? "nav-active" : ""} onClick={openProjectBrowser}>Library</button><button className={chatOpen ? "nav-active" : ""} onClick={() => setChatOpen(true)}>{IS_STATIC_SHOWCASE ? "Desktop" : "Codex"}</button></nav>
         <div className="top-actions">
-          <span className={`save-state ${saved ? "saved" : ""}`}><i />{saved ? "Saved in library" : "Unsaved changes"}</span>
+          <span className={`save-state ${saved ? "saved" : ""}`}><i />{workspaceId ? saved ? "Saved to folder" : "Saving to folder…" : saved ? "Saved in library" : "Unsaved changes"}</span>
           <button className="text-button" onClick={() => importRef.current?.click()}>Import</button>
           <button className="text-button" onClick={() => void exportProject()}>Export .jslife</button>
-          <button className="save-button" onClick={() => void saveProject()}>Save</button>
-          <button className="ai-button" onClick={() => setChatOpen((open) => !open)}><Icon>✦</Icon> Codex</button>
+          <button className="save-button" onClick={() => void saveProject()} disabled={Boolean(workspaceId)}>{workspaceId ? "Auto Save" : "Save"}</button>
+          <button className="ai-button" onClick={() => setChatOpen((open) => !open)}><Icon>✦</Icon> {IS_STATIC_SHOWCASE ? "Get App" : "Codex"}</button>
           <button className="run-button" onClick={runCode}><Icon>▶</Icon> Run</button>
         </div>
       </header>
 
       <section className="projectbar">
-        <div className="project-title"><button aria-label="Open project browser" onClick={openProjectBrowser}>☷</button><div><input value={projectName} onChange={(event) => { setProjectName(event.target.value); setSaved(false); }} aria-label="Project name" /><span>Three.js · JavaScript module</span></div></div>
+        <div className="project-title"><div><input value={projectName} onChange={(event) => { setProjectName(event.target.value); if (!workspaceId) setSaved(false); }} aria-label="Project name" /><span>{workspaceId ? `Local folder · ${workspaceName}` : "Three.js · JavaScript module"}</span></div></div>
         <div className="engine-status"><i /> THREE.JS <b>r185</b></div>
         <div className="project-meta"><span>{fps} FPS</span><span>{resolution.width} × {resolution.height}</span><button onClick={() => stageRef.current?.requestFullscreen?.()} aria-label="Enter fullscreen">⛶</button></div>
       </section>
@@ -1272,14 +1684,18 @@ export default function Playground() {
           <button className={editorOpen && sidebarMode === "files" ? "rail-active" : ""} aria-label="Project files" aria-pressed={editorOpen && sidebarMode === "files"} onClick={() => { if (editorOpen && sidebarMode === "files") toggleEditor(); else { setSidebarMode("files"); setEditorOpen(true); } }} title="Project files"><Icon>⌘</Icon></button>
           <button aria-label="Import" onClick={() => importRef.current?.click()}><Icon>⇣</Icon></button>
           <button aria-label="Add assets" onClick={() => assetRef.current?.click()} title="Add assets"><Icon>◇</Icon></button>
-          <button className={chatOpen ? "rail-ai-active" : ""} aria-label="Codex chat" onClick={() => setChatOpen((open) => !open)}><Icon>✦</Icon></button>
+          <button className={chatOpen ? "rail-ai-active" : ""} aria-label={IS_STATIC_SHOWCASE ? "Get JSLIFE desktop" : "Codex chat"} onClick={() => setChatOpen((open) => !open)}><Icon>✦</Icon></button>
           <span className="rail-spacer" /><button aria-label="Settings"><Icon>⚙</Icon></button>
         </aside>
 
         <section className="editor-panel" aria-label="JavaScript module editor">
-          <div className="panel-heading"><span>{sidebarMode === "library" ? "PROJECTS" : "EDITOR"}</span><div>{sidebarMode === "library" ? <><button className="asset-add" onClick={createBlankProject}>＋ new</button><button className="asset-add" onClick={() => importRef.current?.click()}>Import</button></> : <><button className="asset-add" onClick={addTextFile} title="New text file">＋ file</button><button className="asset-add" onClick={() => assetRef.current?.click()} title="Add assets">＋ asset</button><button className="editor-code-search" onClick={openCodeSearch} title="Find in code (⌘F)" aria-label="Find in code">⌕ <kbd>⌘F</kbd></button></>}</div></div>
+          <div className="panel-heading"><span>{sidebarMode === "library" ? "PROJECTS" : "EDITOR"}</span><div>{sidebarMode === "library" ? <>{!IS_STATIC_SHOWCASE && <button className="asset-add" onClick={() => void openLocalWorkspace()}>Open folder</button>}{!IS_STATIC_SHOWCASE && !workspaceId && <button className="asset-add" onClick={() => void moveToLocalWorkspace()}>Move to Local Files</button>}<button className="asset-add" onClick={() => createBlankProject()}>＋ new</button><button className="asset-add" onClick={() => importRef.current?.click()}>Import</button></> : <><button className="asset-add" onClick={addTextFile} title="New text file">＋ file</button><button className="asset-add" onClick={() => assetRef.current?.click()} title="Add assets">＋ asset</button><button className="editor-code-search" onClick={openCodeSearch} title="Find in code (⌘F)" aria-label="Find in code">⌕ <kbd>⌘F</kbd></button></>}</div></div>
           <div className="editor-body">
-            <aside className="file-browser" aria-label={sidebarMode === "library" ? "Project browser" : "Project file browser"}>
+            <aside className="file-browser" aria-label={sidebarMode === "library" ? "Project browser" : "Project file browser"} onContextMenu={(event) => {
+              if (IS_STATIC_SHOWCASE || sidebarMode !== "files") return;
+              event.preventDefault();
+              setFileBrowserMenu({ x: Math.min(event.clientX, window.innerWidth - 210), y: Math.min(event.clientY, window.innerHeight - 48) });
+            }}>
               {sidebarMode === "files" ? <>
                 <div className="file-browser-title"><span>JSLIFE</span><small>{projectFiles.length}</small></div>
                 <div className="file-tree">
@@ -1307,23 +1723,36 @@ export default function Playground() {
                 </div>
                 <div className="file-browser-summary">{projectFiles.filter(isEditable).length} text · {projectFiles.filter((file) => file.kind === "asset").length} assets</div>
               </> : <>
-                <div className="project-browser-scroll" role="listbox" aria-label="Projects" aria-activedescendant={`project-${selectedProjectKey.replace(/[^a-z0-9_-]/gi, "-")}`} tabIndex={0} onKeyDown={handleProjectBrowserKeyDown}>
-                  <div className="project-browser-section"><span>WORKSPACE</span>
-                    <button id="project-workspace" role="option" aria-selected={selectedProjectKey === "workspace"} className={`project-browser-item${selectedProjectKey === "workspace" ? " project-browser-current" : ""}`} onClick={() => setSelectedProjectKey("workspace")} onDoubleClick={() => activateProjectSelection("workspace")}><i /><span><strong>{projectName}</strong><small>{projectFiles.length} files · {saved ? "saved" : "unsaved"}</small></span></button>
+                <div className="project-browser-scroll project-explorer" role="listbox" aria-label="Projects" aria-activedescendant={`project-${selectedProjectKey.replace(/[^a-z0-9_-]/gi, "-")}`} tabIndex={0} onKeyDown={handleProjectBrowserKeyDown}>
+                  <div className="project-tree-root-node">
+                    <button className="project-tree-root" onClick={() => toggleProjectGroup("browser")} onContextMenu={(event) => openProjectGroupMenu(event, "browser", null)}><span>{collapsedProjectGroups.has("browser") ? "▸" : "▾"}</span><i>▱</i><strong>Browser</strong><small>{visibleLibrary.length + (!workspaceId && showWorkspaceInExplorer ? 1 : 0)}</small></button>
+                    {!collapsedProjectGroups.has("browser") && <div className="project-tree-children">
+                      {renderProjectGroupFolders("browser", null)}
+                      {!workspaceId && showWorkspaceInExplorer && renderExplorerProject("workspace", projectName, `${projectFiles.length} files · ${saved ? "saved" : "unsaved"}`, { loaded: true, package: saved })}
+                      {!visibleLibrary.length && !(!workspaceId && showWorkspaceInExplorer) && <p className="project-browser-empty">Save a project to add it here.</p>}
+                      {visibleLibrary.map((project) => { const key = `saved:${project.id}`; return renderExplorerProject(key, project.name, `${project.files.length} files · ${formatProjectTimestamp(project.updatedAt)}`, {
+                        loaded: project.id === activeProjectId,
+                        package: true,
+                        onDelete: () => { void removeProject(project.id); setLibrary((current) => current.filter((item) => item.id !== project.id)); if (selectedProjectKey === key) selectExplorerProject("workspace"); },
+                      }); })}
+                    </div>}
                   </div>
-                  <div className="project-browser-section"><span>SAVED PROJECTS</span>
-                    {!library.length && <p className="project-browser-empty">Save a project to add it here.</p>}
-                    {library.map((project) => { const key = `saved:${project.id}`; return <div className={`project-browser-entry${selectedProjectKey === key ? " project-browser-selected" : ""}${project.id === activeProjectId ? " project-browser-loaded" : ""}`} key={project.id}>
-                      <button id={`project-${key.replace(/[^a-z0-9_-]/gi, "-")}`} role="option" aria-selected={selectedProjectKey === key} className="project-browser-item" onClick={() => setSelectedProjectKey(key)} onDoubleClick={() => activateProjectSelection(key)}><i /><span><strong>{project.name}</strong><small>{project.files.length} files · {new Date(project.updatedAt).toLocaleDateString()}</small></span></button>
-                      <button className="project-browser-delete" onClick={() => { void removeProject(project.id); setLibrary((current) => current.filter((item) => item.id !== project.id)); if (selectedProjectKey === key) setSelectedProjectKey("workspace"); }} aria-label={`Delete ${project.name}`} title="Delete">×</button>
-                    </div>})}
+                  <div className="project-tree-root-node">
+                    <button className="project-tree-root" onClick={() => toggleProjectGroup("local")} onContextMenu={(event) => openProjectGroupMenu(event, "local", null)}><span>{collapsedProjectGroups.has("local") ? "▸" : "▾"}</span><i>▱</i><strong>Local</strong><small>{workspaceId ? 1 : 0}</small></button>
+                    {!collapsedProjectGroups.has("local") && <div className="project-tree-children">
+                      {renderProjectGroupFolders("local", null)}
+                      {workspaceId ? renderExplorerProject("workspace", projectName, `${projectFiles.length} files · ${workspaceName}`, { loaded: true }) : <p className="project-browser-empty">No local project is open.</p>}
+                    </div>}
                   </div>
-                  <div className="project-browser-section"><span>STARTERS</span>
-                    <button id="project-starter-blank" role="option" aria-selected={selectedProjectKey === "starter:blank"} className={`project-browser-item starter-blank${selectedProjectKey === "starter:blank" ? " project-browser-current" : ""}`} onClick={() => setSelectedProjectKey("starter:blank")} onDoubleClick={() => activateProjectSelection("starter:blank")}><i>＋</i><span><strong>Blank Three.js</strong><small>Minimal scene</small></span></button>
-                    {PRESETS.map((preset, index) => { const key = `starter:${index}`; return <button id={`project-starter-${index}`} role="option" aria-selected={selectedProjectKey === key} className={`project-browser-item${selectedProjectKey === key ? " project-browser-current" : ""}`} key={preset.name} onClick={() => setSelectedProjectKey(key)} onDoubleClick={() => activateProjectSelection(key)}><i style={{ "--swatch": preset.accent } as React.CSSProperties} /><span><strong>{preset.name}</strong><small>Three.js starter</small></span></button>})}
+                  <div className="project-tree-root-node">
+                    <button className="project-tree-root project-tree-root-readonly" onClick={() => toggleProjectGroup("starters")}><span>{collapsedProjectGroups.has("starters") ? "▸" : "▾"}</span><i>▱</i><strong>Starters</strong><small>{PRESETS.length + 1}</small></button>
+                    {!collapsedProjectGroups.has("starters") && <div className="project-tree-children">
+                      {renderExplorerProject("starter:blank", "Blank Three.js", "Minimal Three.js scene", { blank: true })}
+                      {PRESETS.map((preset, index) => renderExplorerProject(`starter:${index}`, preset.name, "Three.js starter", { accent: preset.accent }))}
+                    </div>}
                   </div>
                 </div>
-                <div className="project-browser-footer"><button onClick={exportLibrary} disabled={!library.length}>Backup JSON</button></div>
+                <div className="project-browser-footer">{!IS_STATIC_SHOWCASE && <button onClick={() => void openLocalWorkspace()}>Open local folder</button>}{!IS_STATIC_SHOWCASE && !workspaceId && <button onClick={() => void moveToLocalWorkspace()}>Move to Local Files</button>}<button onClick={exportLibrary} disabled={!library.length}>Backup JSON</button></div>
               </>}
             </aside>
             <div className="code-workspace">
@@ -1333,7 +1762,7 @@ export default function Playground() {
                   <button onClick={() => activateProjectSelection()}>Open project</button>
                 </header>
                 <div className="project-directory-tree">
-                  <div className="project-directory-root"><span>▾</span><b>{safeName(selectedProject.name)}</b><small>{selectedProject.files.length} files</small></div>
+                  <div className="project-directory-root"><span>▾</span><b>{safeName(selectedProject.name)}{selectedProjectKey.startsWith("saved:") ? ".jslife" : ""}</b><small>{selectedProject.files.length} files</small></div>
                   {selectedProjectRows.map((row) => row.kind === "folder" ? (
                     <button
                       key={`preview-folder:${row.path}`}
@@ -1428,18 +1857,30 @@ export default function Playground() {
         </section>
 
         <aside className="chat-panel" aria-label="Codex pair programmer">
-          <div className="chat-head">
+          {IS_STATIC_SHOWCASE ? <div className="chat-head">
+            <div className="chat-title"><i className="offline" /><span><strong>JSLIFE DESKTOP</strong><small>AIと実ファイル編集はデスクトップ版で利用できます</small></span></div>
+            <div><button onClick={() => setChatOpen(false)} title="Close">×</button></div>
+          </div> : <div className="chat-head">
             <div className="chat-title">
               <i className={chatOnline === true ? "online" : chatOnline === false ? "offline" : "checking"} />
               <span><strong>CODEX PAIR</strong><small>{chatOnline === true ? "ChatGPTで接続済み" : chatOnline === false ? companionNeedsPairing ? "Companionのペアリングが必要" : "Companion未接続" : "接続確認中"}</small></span>
             </div>
             <div><button className={chatHistoryOpen ? "chat-history-active" : ""} onClick={() => setChatHistoryOpen((open) => !open)} title="Conversation history" aria-label="Conversation history">◷</button><button onClick={newChat} disabled={chatBusy} title="New chat" aria-label="New chat">＋</button><button onClick={() => setChatOpen(false)} title="Close">×</button></div>
-          </div>
+          </div>}
 
+          {IS_STATIC_SHOWCASE ? <section className="static-distribution">
+            <span className="static-distribution-mark">✦</span>
+            <strong>このページはブラウザ体験版です</strong>
+            <p>コード編集、Three.jsの実行、ブラウザ内保存はそのまま試せます。Codexチャット、実フォルダの編集、Finder連携はJSLIFEデスクトップ版で利用してください。</p>
+            <a className="static-download" href={RELEASE_DOWNLOAD_URL}>最新Releaseをダウンロード</a>
+            <a className="static-release" href={RELEASE_URL}>Releaseページを見る</a>
+            <div className="static-clone"><span>ソースから起動</span><code>git clone {REPOSITORY_URL}.git{"\n"}cd JSLife{"\n"}npm ci{"\n"}npm run dev</code></div>
+            <a className="static-repository" href={REPOSITORY_URL}>GitHubリポジトリを開く</a>
+          </section> : <>
           {chatHistoryOpen && <section className="chat-history" aria-label="Conversation history">
-            <div className="chat-history-heading"><span>CONVERSATIONS</span><small>{chatConversations.length}</small></div>
+            <div className="chat-history-heading"><span>CONVERSATIONS</span><small>{projectChatConversations.length}</small></div>
             <div className="chat-history-list">
-              {chatConversations.map((conversation) => <button
+              {projectChatConversations.map((conversation) => <button
                 key={conversation.id}
                 className={conversation.id === activeConversationId ? "chat-history-current" : ""}
                 onClick={() => selectChatConversation(conversation)}
@@ -1500,8 +1941,18 @@ export default function Playground() {
             </div>
             <small className="chat-privacy">テキストファイル、アセット一覧、プレビューをローカルCodexへ送信 · バイナリアセット本体は送信しません</small>
           </div>
+          </>}
         </aside>
       </section>
+
+      {fileBrowserMenu && <div className="file-browser-context-menu" style={{ left: fileBrowserMenu.x, top: fileBrowserMenu.y }} onPointerDown={(event) => event.stopPropagation()}>
+        {workspaceId
+          ? <button onClick={() => void revealLocalWorkspace()}>Open Project Folder in Finder</button>
+          : <button onClick={() => { setFileBrowserMenu(null); void moveToLocalWorkspace(); }}>Move to Local Files</button>}
+      </div>}
+      {projectTreeMenu && <div className="file-browser-context-menu project-tree-context-menu" style={{ left: projectTreeMenu.x, top: projectTreeMenu.y }} onPointerDown={(event) => event.stopPropagation()}>
+        <button onClick={addProjectGroup}>Add Group</button>
+      </div>}
 
     </main>
   );

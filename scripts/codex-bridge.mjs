@@ -1,8 +1,10 @@
 import { createServer } from "node:http";
 import { mkdirSync } from "node:fs";
-import { writeFile, unlink } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { lstat, mkdir, readFile, readdir, realpath, unlink, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { homedir, tmpdir } from "node:os";
+import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { promisify } from "node:util";
 import { randomUUID } from "node:crypto";
 import { timingSafeEqual } from "node:crypto";
 import { Codex } from "@openai/codex-sdk";
@@ -13,10 +15,36 @@ const WORKSPACE = join(tmpdir(), "jslife-codex-chat");
 const DEVELOPMENT_ORIGINS = new Set([
   "http://localhost:3000",
   "http://127.0.0.1:3000",
+  `http://localhost:${PORT}`,
+  `http://${HOST}:${PORT}`,
 ]);
 const COMPANION_TOKEN = process.env.JSLIFE_COMPANION_TOKEN || "";
+const UI_ROOT = process.env.JSLIFE_UI_ROOT || "";
+const COMPANION_DATA = process.env.JSLIFE_COMPANION_DATA_DIR || join(homedir(), "Library", "Application Support", "JSLIFE Companion");
+const MANAGED_PROJECTS = process.env.JSLIFE_PROJECTS_DIR || join(homedir(), "Library", "Application Support", "JSLIFE", "Projects");
+const WORKSPACE_REGISTRY = join(COMPANION_DATA, "workspaces.json");
+const execFileAsync = promisify(execFile);
+const IGNORED_DIRECTORIES = new Set([".git", ".next", ".wrangler", "build", "dist", "dist-pages", "node_modules"]);
+const TEXT_EXTENSIONS = new Set([".css", ".frag", ".glsl", ".htm", ".html", ".js", ".json", ".jsx", ".md", ".mjs", ".text", ".ts", ".tsx", ".txt", ".vert"]);
+const MAX_WORKSPACE_BYTES = 30_000_000;
+const MAX_WORKSPACE_FILES = 1_000;
+const STATIC_MIME_TYPES = new Map([
+  [".css", "text/css; charset=utf-8"],
+  [".html", "text/html; charset=utf-8"],
+  [".js", "text/javascript; charset=utf-8"],
+  [".json", "application/json; charset=utf-8"],
+  [".png", "image/png"],
+  [".svg", "image/svg+xml"],
+  [".woff2", "font/woff2"],
+]);
 
 mkdirSync(WORKSPACE, { recursive: true });
+mkdirSync(COMPANION_DATA, { recursive: true });
+
+let workspaceRegistry = {};
+try {
+  workspaceRegistry = JSON.parse(await readFile(WORKSPACE_REGISTRY, "utf8"));
+} catch { /* the registry is created after the first folder is selected */ }
 
 const codex = new Codex(process.env.JSLIFE_CODEX_PATH ? { codexPathOverride: process.env.JSLIFE_CODEX_PATH } : undefined);
 const threadOptions = {
@@ -96,10 +124,132 @@ async function readJson(request) {
   let size = 0;
   for await (const chunk of request) {
     size += chunk.length;
-    if (size > 2_500_000) throw new Error("Request is too large");
+    if (size > MAX_WORKSPACE_BYTES * 1.5) throw new Error("Request is too large");
     chunks.push(chunk);
   }
   return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+}
+
+async function serveDesktopUi(request, response) {
+  if (!UI_ROOT || request.method !== "GET") return false;
+  const pathname = decodeURIComponent(new URL(request.url || "/", "http://localhost").pathname);
+  if (pathname !== "/" && !pathname.startsWith("/assets/") && pathname !== "/favicon.svg" && pathname !== "/og.png") return false;
+  const relativePath = pathname === "/" ? "index.html" : pathname.slice(1);
+  const target = resolve(UI_ROOT, relativePath);
+  const offset = relative(UI_ROOT, target);
+  if (offset === ".." || offset.startsWith(`..${sep}`) || isAbsolute(offset)) return false;
+  try {
+    const content = await readFile(target);
+    response.writeHead(200, {
+      "Content-Type": STATIC_MIME_TYPES.get(extname(target).toLowerCase()) || "application/octet-stream",
+      "Cache-Control": relativePath === "index.html" ? "no-store" : "public, max-age=31536000, immutable",
+    });
+    response.end(content);
+    return true;
+  } catch { return false; }
+}
+
+const workspaceFor = (workspaceId) => {
+  const record = workspaceRegistry[workspaceId];
+  const root = typeof record === "string" ? record : record?.root;
+  if (typeof root !== "string" || !isAbsolute(root)) throw new Error("Unknown local workspace");
+  return root;
+};
+
+const safeWorkspacePath = (root, projectPath) => {
+  if (typeof projectPath !== "string" || !projectPath || projectPath.includes("\0") || isAbsolute(projectPath)) throw new Error("Invalid project path");
+  const target = resolve(root, projectPath);
+  const offset = relative(root, target);
+  if (!offset || offset === ".." || offset.startsWith(`..${sep}`) || isAbsolute(offset)) throw new Error("Path leaves the selected workspace");
+  return target;
+};
+
+const isTextPath = (path) => TEXT_EXTENSIONS.has(extname(path).toLowerCase());
+
+async function readWorkspace(workspaceId) {
+  const root = workspaceFor(workspaceId);
+  const record = workspaceRegistry[workspaceId];
+  const name = typeof record === "object" && typeof record?.name === "string" ? record.name : basename(root);
+  const files = [];
+  let totalBytes = 0;
+  const visit = async (directory, prefix = "") => {
+    const entries = await readdir(directory, { withFileTypes: true });
+    for (const entry of entries) {
+      if (entry.name.startsWith(".") || IGNORED_DIRECTORIES.has(entry.name)) continue;
+      const projectPath = prefix ? `${prefix}/${entry.name}` : entry.name;
+      const absolutePath = safeWorkspacePath(root, projectPath);
+      if (entry.isSymbolicLink()) continue;
+      if (entry.isDirectory()) {
+        await visit(absolutePath, projectPath);
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      const info = await lstat(absolutePath);
+      totalBytes += info.size;
+      if (files.length >= MAX_WORKSPACE_FILES || totalBytes > MAX_WORKSPACE_BYTES) throw new Error("Selected folder is too large for JSLIFE");
+      const bytes = await readFile(absolutePath);
+      const mimeType = isTextPath(projectPath) ? "text/plain" : "application/octet-stream";
+      files.push(isTextPath(projectPath)
+        ? { path: projectPath, kind: "text", mimeType, content: bytes.toString("utf8") }
+        : { path: projectPath, kind: "asset", mimeType, base64: bytes.toString("base64") });
+    }
+  };
+  await visit(root);
+  return { workspaceId, name, folderName: basename(root), files };
+}
+
+async function chooseWorkspace() {
+  const script = 'POSIX path of (choose folder with prompt "JSLIFEで開くプロジェクトフォルダを選択")';
+  const { stdout } = await execFileAsync("/usr/bin/osascript", ["-e", script]);
+  const root = (await realpath(stdout.trim())).replace(/\/$/, "");
+  const workspaceId = randomUUID();
+  workspaceRegistry[workspaceId] = { root, name: basename(root) };
+  await writeFile(WORKSPACE_REGISTRY, JSON.stringify(workspaceRegistry, null, 2), { mode: 0o600 });
+  return readWorkspace(workspaceId);
+}
+
+async function moveToWorkspace(payload) {
+  const projectName = String(payload.projectName || "Untitled Project").trim() || "Untitled Project";
+  const directoryName = projectName
+    .normalize("NFKC")
+    .replace(/[\u0000-\u001f\/:]/g, "-")
+    .replace(/^\.+|\s+$/g, "")
+    .slice(0, 60) || "Untitled Project";
+  const workspaceId = randomUUID();
+  const root = join(MANAGED_PROJECTS, `${directoryName}-${workspaceId.slice(0, 8)}`);
+  await mkdir(MANAGED_PROJECTS, { recursive: true });
+  await mkdir(root, { recursive: false });
+  workspaceRegistry[workspaceId] = { root, name: projectName };
+  await writeFile(WORKSPACE_REGISTRY, JSON.stringify(workspaceRegistry, null, 2), { mode: 0o600 });
+  await syncWorkspace(workspaceId, { files: payload.files, removedPaths: [] });
+  return readWorkspace(workspaceId);
+}
+
+async function syncWorkspace(workspaceId, payload) {
+  const root = workspaceFor(workspaceId);
+  const rootRealPath = await realpath(root);
+  const changedFiles = Array.isArray(payload.files) ? payload.files : [];
+  const removedPaths = Array.isArray(payload.removedPaths) ? payload.removedPaths : [];
+  for (const file of changedFiles) {
+    const target = safeWorkspacePath(root, file.path);
+    await mkdir(dirname(target), { recursive: true });
+    const parentRealPath = await realpath(dirname(target));
+    if (parentRealPath !== rootRealPath && !parentRealPath.startsWith(`${rootRealPath}${sep}`)) throw new Error("Path leaves the selected workspace");
+    const existingTarget = await lstat(target).catch((error) => {
+      if (error?.code === "ENOENT") return null;
+      throw error;
+    });
+    if (existingTarget?.isSymbolicLink()) throw new Error("Symbolic links cannot be overwritten");
+    const body = file.kind === "asset" ? Buffer.from(file.base64 || "", "base64") : String(file.content ?? "");
+    await writeFile(target, body);
+  }
+  for (const projectPath of removedPaths) {
+    const target = safeWorkspacePath(root, projectPath);
+    await unlink(target).catch((error) => {
+      if (error?.code !== "ENOENT") throw error;
+    });
+  }
+  return { ok: true };
 }
 
 function buildPrompt({ message, code, files, error, projectName, previewImage }) {
@@ -180,6 +330,8 @@ const server = createServer(async (request, response) => {
     return;
   }
 
+  if (await serveDesktopUi(request, response)) return;
+
   if (request.method === "GET" && request.url === "/health") {
     if (!isAuthorized(request)) {
       writeJson(response, 401, { ok: false, service: "jslife-codex", auth: "pairing-required" }, origin);
@@ -189,13 +341,69 @@ const server = createServer(async (request, response) => {
     return;
   }
 
-  if (request.method !== "POST" || request.url !== "/chat") {
-    writeJson(response, 404, { error: "Not found" }, origin);
+  if (!isAuthorized(request)) {
+    writeJson(response, 401, { error: "Companion pairing required" }, origin);
     return;
   }
 
-  if (!isAuthorized(request)) {
-    writeJson(response, 401, { error: "Companion pairing required" }, origin);
+  if (request.method === "POST" && request.url === "/workspaces/open") {
+    try {
+      writeJson(response, 200, await chooseWorkspace(), origin);
+    } catch (error) {
+      const cancelled = error?.code === 1 && /cancel/i.test(error.stderr || "");
+      writeJson(response, cancelled ? 409 : 500, { error: cancelled ? "Folder selection cancelled" : error instanceof Error ? error.message : "Could not open folder" }, origin);
+    }
+    return;
+  }
+
+  if (request.method === "POST" && request.url === "/workspaces/move") {
+    try {
+      const payload = await readJson(request);
+      if (!payload || !Array.isArray(payload.files) || !payload.files.some((file) => file?.path === "main.js" && file?.kind === "text")) {
+        writeJson(response, 400, { error: "A text main.js file is required" }, origin);
+        return;
+      }
+      writeJson(response, 200, await moveToWorkspace(payload), origin);
+    } catch (error) {
+      const cancelled = error?.code === 1 && /cancel/i.test(error.stderr || "");
+      writeJson(response, cancelled ? 409 : 500, { error: cancelled ? "Folder selection cancelled" : error instanceof Error ? error.message : "Could not move project" }, origin);
+    }
+    return;
+  }
+
+  const workspaceRevealMatch = request.url?.match(/^\/workspaces\/([a-f0-9-]+)\/reveal$/i);
+  if (request.method === "POST" && workspaceRevealMatch) {
+    try {
+      await execFileAsync("/usr/bin/open", [workspaceFor(workspaceRevealMatch[1])]);
+      writeJson(response, 200, { ok: true }, origin);
+    } catch (error) {
+      writeJson(response, 404, { error: error instanceof Error ? error.message : "Could not open project folder" }, origin);
+    }
+    return;
+  }
+
+  const workspaceMatch = request.url?.match(/^\/workspaces\/([a-f0-9-]+)$/i);
+  if (request.method === "GET" && workspaceMatch) {
+    try {
+      writeJson(response, 200, await readWorkspace(workspaceMatch[1]), origin);
+    } catch (error) {
+      writeJson(response, 404, { error: error instanceof Error ? error.message : "Could not read workspace" }, origin);
+    }
+    return;
+  }
+
+  const workspaceSyncMatch = request.url?.match(/^\/workspaces\/([a-f0-9-]+)\/sync$/i);
+  if (request.method === "POST" && workspaceSyncMatch) {
+    try {
+      writeJson(response, 200, await syncWorkspace(workspaceSyncMatch[1], await readJson(request)), origin);
+    } catch (error) {
+      writeJson(response, 400, { error: error instanceof Error ? error.message : "Could not save workspace" }, origin);
+    }
+    return;
+  }
+
+  if (request.method !== "POST" || request.url !== "/chat") {
+    writeJson(response, 404, { error: "Not found" }, origin);
     return;
   }
 
@@ -278,7 +486,11 @@ const server = createServer(async (request, response) => {
   }
 });
 
-server.listen(PORT, HOST, () => {
-  process.stdout.write(`JSLIFE Codex bridge: http://${HOST}:${PORT}\n`);
-  process.stdout.write("Authentication: existing local Codex / ChatGPT login\n");
-});
+export { moveToWorkspace, readWorkspace, safeWorkspacePath, syncWorkspace };
+
+if (process.env.JSLIFE_BRIDGE_NO_LISTEN !== "1") {
+  server.listen(PORT, HOST, () => {
+    process.stdout.write(`JSLIFE Codex bridge: http://${HOST}:${PORT}\n`);
+    process.stdout.write("Authentication: existing local Codex / ChatGPT login\n");
+  });
+}

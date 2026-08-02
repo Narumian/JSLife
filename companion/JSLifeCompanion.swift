@@ -1,8 +1,9 @@
 import AppKit
 import Foundation
+import WebKit
 
 @main
-enum JSLifeCompanionApplication {
+enum JSLifeApplication {
     static func main() {
         let application = NSApplication.shared
         let delegate = AppDelegate()
@@ -12,18 +13,18 @@ enum JSLifeCompanionApplication {
     }
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
     private var window: NSWindow!
-    private var statusLabel: NSTextField!
-    private var detailLabel: NSTextField!
-    private var loginButton: NSButton!
+    private var webView: WKWebView!
     private var bridgeProcess: Process?
     private var loginProcess: Process?
+    private var navigationAttempts = 0
 
     private var resourcesURL: URL { Bundle.main.resourceURL! }
     private var nodeURL: URL { resourcesURL.appendingPathComponent("runtime/bin/node") }
     private var codexURL: URL { resourcesURL.appendingPathComponent("runtime/bin/codex") }
     private var serverURL: URL { resourcesURL.appendingPathComponent("server/codex-bridge.mjs") }
+    private var uiURL: URL { resourcesURL.appendingPathComponent("ui") }
 
     private var pairingToken: String {
         if let existing = UserDefaults.standard.string(forKey: "pairingToken"), !existing.isEmpty {
@@ -34,35 +35,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return token
     }
 
-    func applicationWillFinishLaunching(_ notification: Notification) {
-        NSAppleEventManager.shared().setEventHandler(
-            self,
-            andSelector: #selector(handleURL(event:reply:)),
-            forEventClass: AEEventClass(kInternetEventClass),
-            andEventID: AEEventID(kAEGetURL)
-        )
-    }
-
     func applicationDidFinishLaunching(_ notification: Notification) {
+        buildMenu()
         buildWindow()
         startBridge()
-        refreshLoginStatus()
+        loadApplication()
         showWindow()
-    }
-
-    func applicationDidBecomeActive(_ notification: Notification) {
-        if window != nil, !window.isVisible {
-            showWindow()
-        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         bridgeProcess?.terminate()
         loginProcess?.terminate()
-        NSAppleEventManager.shared().removeEventHandler(
-            forEventClass: AEEventClass(kInternetEventClass),
-            andEventID: AEEventID(kAEGetURL)
-        )
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -70,58 +53,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return true
     }
 
-    private func showWindow() {
-        window.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+    private func buildMenu() {
+        let mainMenu = NSMenu()
+        let applicationItem = NSMenuItem()
+        mainMenu.addItem(applicationItem)
+        let applicationMenu = NSMenu()
+        applicationMenu.addItem(withTitle: "About JSLIFE", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        applicationMenu.addItem(.separator())
+        applicationMenu.addItem(withTitle: "Quit JSLIFE", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        applicationItem.submenu = applicationMenu
+
+        let accountItem = NSMenuItem()
+        mainMenu.addItem(accountItem)
+        let accountMenu = NSMenu(title: "Codex")
+        let loginItem = accountMenu.addItem(withTitle: "ChatGPTでログイン", action: #selector(startLogin), keyEquivalent: "l")
+        loginItem.target = self
+        let reloadItem = accountMenu.addItem(withTitle: "JSLIFEを再読み込み", action: #selector(reloadApplication), keyEquivalent: "r")
+        reloadItem.target = self
+        accountItem.submenu = accountMenu
+        NSApp.mainMenu = mainMenu
     }
 
     private func buildWindow() {
         window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 440, height: 260),
-            styleMask: [.titled, .closable, .miniaturizable],
+            contentRect: NSRect(x: 0, y: 0, width: 1380, height: 860),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
         )
         window.center()
-        window.title = "JSLIFE Companion"
+        window.title = "JSLIFE"
+        window.minSize = NSSize(width: 900, height: 620)
         window.isReleasedWhenClosed = false
 
-        let title = NSTextField(labelWithString: "JSLIFE Companion")
-        title.font = .systemFont(ofSize: 22, weight: .semibold)
-        title.textColor = NSColor(calibratedRed: 0.78, green: 1.0, blue: 0.27, alpha: 1)
+        guard let content = window.contentView else { return }
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = .default()
+        webView = WKWebView(frame: content.bounds, configuration: configuration)
+        webView.navigationDelegate = self
+        webView.autoresizingMask = [.width, .height]
+        content.addSubview(webView)
+    }
 
-        statusLabel = NSTextField(labelWithString: "起動中…")
-        statusLabel.font = .systemFont(ofSize: 14, weight: .medium)
-
-        detailLabel = NSTextField(wrappingLabelWithString: "GitHub Pages版JSLIFEと、このMacのCodexを安全に接続します。")
-        detailLabel.textColor = .secondaryLabelColor
-        detailLabel.maximumNumberOfLines = 3
-
-        loginButton = NSButton(title: "ChatGPTで接続", target: self, action: #selector(startLogin))
-        loginButton.bezelStyle = .rounded
-        loginButton.keyEquivalent = "\r"
-
-        let refreshButton = NSButton(title: "状態を確認", target: self, action: #selector(refreshStatusButton))
-        refreshButton.bezelStyle = .rounded
-
-        let buttons = NSStackView(views: [loginButton, refreshButton])
-        buttons.orientation = .horizontal
-        buttons.spacing = 8
-
-        let stack = NSStackView(views: [title, statusLabel, detailLabel, buttons])
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 14
-        stack.translatesAutoresizingMaskIntoConstraints = false
-
-        let content = NSView()
-        content.addSubview(stack)
-        window.contentView = content
-        NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 28),
-            stack.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -28),
-            stack.topAnchor.constraint(equalTo: content.topAnchor, constant: 28),
-        ])
+    private func showWindow() {
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     private func startBridge() {
@@ -133,137 +109,90 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         var environment = ProcessInfo.processInfo.environment
         environment["JSLIFE_CODEX_PATH"] = codexURL.path
         environment["JSLIFE_COMPANION_TOKEN"] = pairingToken
+        environment["JSLIFE_UI_ROOT"] = uiURL.path
         process.environment = environment
         process.standardOutput = Pipe()
         process.standardError = Pipe()
         process.terminationHandler = { [weak self] _ in
             DispatchQueue.main.async {
-                self?.statusLabel.stringValue = "ローカルブリッジが停止しました"
-                self?.detailLabel.stringValue = "JSLIFE Companionを再起動してください。"
+                self?.showBridgeFailure()
             }
         }
         do {
             try process.run()
             bridgeProcess = process
         } catch {
-            statusLabel.stringValue = "ブリッジを起動できません"
-            detailLabel.stringValue = error.localizedDescription
+            showBridgeFailure(error.localizedDescription)
         }
+    }
+
+    private func loadApplication() {
+        window.title = "JSLIFE — Loading"
+        var components = URLComponents(string: "http://127.0.0.1:4317/")!
+        components.queryItems = [URLQueryItem(name: "companion_token", value: pairingToken)]
+        webView.load(URLRequest(url: components.url!))
+    }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        navigationAttempts = 0
+        window.title = "JSLIFE"
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            self?.webView.evaluateJavaScript("document.getElementById('root')?.childElementCount || 0") { value, error in
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    if let error {
+                        self.window.title = "JSLIFE — UI Check Failed"
+                        self.showBridgeFailure(error.localizedDescription)
+                    } else if (value as? Int ?? 0) == 0 {
+                        self.window.title = "JSLIFE — UI Did Not Render"
+                    }
+                }
+            }
+        }
+    }
+
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        guard bridgeProcess?.isRunning == true, navigationAttempts < 40 else {
+            window.title = "JSLIFE — Could Not Start"
+            showBridgeFailure(error.localizedDescription)
+            return
+        }
+        navigationAttempts += 1
+        window.title = "JSLIFE — Starting Local Service"
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in self?.loadApplication() }
+    }
+
+    private func showBridgeFailure(_ detail: String = "JSLIFEを終了して、もう一度起動してください。") {
+        guard webView != nil else { return }
+        let escaped = detail.replacingOccurrences(of: "&", with: "&amp;").replacingOccurrences(of: "<", with: "&lt;")
+        webView.loadHTMLString("""
+        <body style="margin:0;background:#090c0e;color:#f2f4ed;font:14px -apple-system;display:grid;place-items:center;height:100vh">
+          <div style="max-width:520px;text-align:center"><h1 style="color:#c8ff45">JSLIFE</h1><p>\(escaped)</p></div>
+        </body>
+        """, baseURL: nil)
+    }
+
+    @objc private func reloadApplication() {
+        startBridge()
+        navigationAttempts = 0
+        loadApplication()
     }
 
     @objc private func startLogin() {
         guard loginProcess?.isRunning != true else { return }
-        loginButton.isEnabled = false
-        statusLabel.stringValue = "ブラウザでChatGPTに接続してください"
-        detailLabel.stringValue = "認証が終わると、この画面へ接続状態が反映されます。"
-
         let process = Process()
         process.executableURL = codexURL
         process.arguments = ["login"]
         process.standardOutput = Pipe()
         process.standardError = Pipe()
         process.terminationHandler = { [weak self] _ in
-            DispatchQueue.main.async {
-                self?.loginButton.isEnabled = true
-                self?.refreshLoginStatus()
-            }
+            DispatchQueue.main.async { self?.loadApplication() }
         }
         do {
             try process.run()
             loginProcess = process
         } catch {
-            loginButton.isEnabled = true
-            statusLabel.stringValue = "ChatGPTログインを開始できません"
-            detailLabel.stringValue = error.localizedDescription
-        }
-    }
-
-    @objc private func refreshStatusButton() {
-        refreshLoginStatus()
-    }
-
-    private func refreshLoginStatus() {
-        let process = Process()
-        let output = Pipe()
-        process.executableURL = codexURL
-        process.arguments = ["login", "status"]
-        process.standardOutput = output
-        process.standardError = output
-        process.terminationHandler = { [weak self] completed in
-            let data = output.fileHandleForReading.readDataToEndOfFile()
-            let text = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            DispatchQueue.main.async {
-                guard let self else { return }
-                if completed.terminationStatus == 0 {
-                    self.statusLabel.stringValue = "ChatGPTで接続済み"
-                    self.detailLabel.stringValue = "JSLIFEを開くと、AIチャットが自動的にこのCompanionへ接続します。"
-                    self.loginButton.title = "再ログイン"
-                } else {
-                    self.statusLabel.stringValue = "ChatGPTへ未接続"
-                    self.detailLabel.stringValue = text.isEmpty ? "「ChatGPTで接続」を押して認証してください。" : text
-                    self.loginButton.title = "ChatGPTで接続"
-                }
-            }
-        }
-        do {
-            try process.run()
-        } catch {
-            statusLabel.stringValue = "認証状態を確認できません"
-            detailLabel.stringValue = error.localizedDescription
-        }
-    }
-
-    @objc private func handleURL(event: NSAppleEventDescriptor, reply: NSAppleEventDescriptor) {
-        guard
-            let rawURL = event.paramDescriptor(forKeyword: keyDirectObject)?.stringValue,
-            let components = URLComponents(string: rawURL),
-            components.scheme == "jslife-companion",
-            components.host == "pair",
-            let returnValue = components.queryItems?.first(where: { $0.name == "return_url" })?.value,
-            var returnComponents = URLComponents(string: returnValue),
-            let scheme = returnComponents.scheme,
-            let host = returnComponents.host,
-            scheme == "https" || (scheme == "http" && (host == "localhost" || host == "127.0.0.1"))
-        else { return }
-
-        var queryItems = returnComponents.queryItems ?? []
-        queryItems.removeAll(where: { $0.name == "companion_token" })
-        queryItems.append(URLQueryItem(name: "companion_token", value: pairingToken))
-        returnComponents.queryItems = queryItems
-        guard let destination = returnComponents.url else { return }
-        open(destination, in: components.queryItems?.first(where: { $0.name == "browser" })?.value)
-        window.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
-    }
-
-    private func open(_ destination: URL, in browser: String?) {
-        let bundleIdentifier: String?
-        switch browser {
-        case "chrome": bundleIdentifier = "com.google.Chrome"
-        case "edge": bundleIdentifier = "com.microsoft.edgemac"
-        case "firefox": bundleIdentifier = "org.mozilla.firefox"
-        case "safari": bundleIdentifier = "com.apple.Safari"
-        default: bundleIdentifier = nil
-        }
-
-        guard
-            let bundleIdentifier,
-            let applicationURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleIdentifier)
-        else {
-            NSWorkspace.shared.open(destination)
-            return
-        }
-
-        let configuration = NSWorkspace.OpenConfiguration()
-        configuration.activates = true
-        NSWorkspace.shared.open(
-            [destination],
-            withApplicationAt: applicationURL,
-            configuration: configuration
-        ) { _, error in
-            if error != nil {
-                NSWorkspace.shared.open(destination)
-            }
+            showBridgeFailure(error.localizedDescription)
         }
     }
 }

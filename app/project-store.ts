@@ -32,6 +32,8 @@ export type DraftRecord = {
   files: ProjectFile[];
   activePath: string;
   saved: boolean;
+  workspaceId?: string | null;
+  workspaceName?: string | null;
 };
 
 export type StoredChatFileAction = {

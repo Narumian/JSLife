@@ -43,6 +43,19 @@ export function dispose() {
 13. AIが返す説明と複数ファイルの書込み・削除・移動案を分け、ユーザーが確認してから適用・実行し、直前のファイル群へ戻せるようにした。
 14. 相対import、GLSL・JSONなどのテキストimport、`asset()`とアセットimport、`.jslife`パッケージのImport・Exportを追加。
 15. 本番ビルドでTypeScriptとCloudflare Worker互換出力を検証。
+16. チャット履歴をプロジェクトID単位へ分離し、最後に開いていた会話をプロジェクトごとに復元。
+17. 許可したローカルフォルダだけを読み書きするワークスペースAPIと、実ファイルへの自動保存を追加。
+18. 配布版を補助的なCompanionから、React UIをWKWebViewで直接表示する`JSLIFE.app`へ変更。
+19. デスクトップ版、`npm run dev`によるローカル版、AIを無効化したGitHub Pages体験版の3モードへ分離。
+20. 「Move to Local Files」でブラウザ内プロジェクト一式を`~/Library/Application Support/JSLIFE/Projects/`へ書き出し、その場で実ファイル自動保存へ切り替える導線を追加。元のIndexedDB版はバックアップとして維持し、ファイルブラウザの右クリックからFinderで保存場所を開ける。
+21. プロジェクトブラウザの左側をフォルダ専用ナビゲーションへ変更。整理用グループと`main.js`を持つプロジェクトフォルダ／仮想`.jslife`だけを並べ、選択したプロジェクトの内部ファイルは右側のディレクトリブラウザへ表示する。
+22. 左側を`Browser`、`Local`、`Starters`の3ルートディレクトリを持つ単一ツリーへ統合。`Browser`、`Local`、通常グループの右クリックから`Add Group`で入れ子の仮想グループを追加し、構成をブラウザへ永続保存する。
+
+## 3つの配布・実行モード
+
+- **JSLIFE.app**: UI、Three.jsランタイム、実ファイル操作、Codexを一つのmacOSアプリへ内蔵する正式配布版。別ブラウザやペアリングは不要。
+- **ローカル版**: clone後に`npm ci`と`npm run dev`を実行する。AgentはUIとCodexブリッジを確認し、未起動の場合だけ`npm run dev`を長時間実行セッションで起動する。必要な場合だけビルトインブラウザを開く。
+- **GitHub Pages版**: インストール不要の体験版。コード編集、描画、ブラウザ保存、Import・Exportは使えるが、AIチャットと実フォルダ操作は無効。Release版またはcloneを案内する。
 
 ## Codexチャット
 

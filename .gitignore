@@ -39,7 +39,9 @@ next-env.d.ts
 *.tsbuildinfo
 /dist/
 /dist-pages/
+/dist-desktop/
 /build-companion/
+/build-app/
 /.companion-cache/
 /.wrangler/
 /outputs/
