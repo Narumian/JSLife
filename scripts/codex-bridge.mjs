@@ -4,19 +4,21 @@ import { writeFile, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
+import { timingSafeEqual } from "node:crypto";
 import { Codex } from "@openai/codex-sdk";
 
 const HOST = "127.0.0.1";
 const PORT = Number(process.env.JSLIFE_CODEX_PORT || 4317);
 const WORKSPACE = join(tmpdir(), "jslife-codex-chat");
-const ALLOWED_ORIGINS = new Set([
+const DEVELOPMENT_ORIGINS = new Set([
   "http://localhost:3000",
   "http://127.0.0.1:3000",
 ]);
+const COMPANION_TOKEN = process.env.JSLIFE_COMPANION_TOKEN || "";
 
 mkdirSync(WORKSPACE, { recursive: true });
 
-const codex = new Codex();
+const codex = new Codex(process.env.JSLIFE_CODEX_PATH ? { codexPathOverride: process.env.JSLIFE_CODEX_PATH } : undefined);
 const threadOptions = {
   workingDirectory: WORKSPACE,
   skipGitRepoCheck: true,
@@ -51,14 +53,33 @@ const outputSchema = {
   additionalProperties: false,
 };
 
+function isAllowedOrigin(origin) {
+  if (DEVELOPMENT_ORIGINS.has(origin)) return true;
+  try {
+    return new URL(origin).protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
 function corsHeaders(origin) {
   return {
-    "Access-Control-Allow-Origin": ALLOWED_ORIGINS.has(origin) ? origin : "http://localhost:3000",
+    "Access-Control-Allow-Origin": isAllowedOrigin(origin) ? origin : "null",
     "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type",
+    "Access-Control-Allow-Headers": "Content-Type, X-JSLIFE-Companion-Token",
+    "Access-Control-Allow-Private-Network": "true",
     "Access-Control-Max-Age": "86400",
     Vary: "Origin",
   };
+}
+
+function isAuthorized(request) {
+  if (!COMPANION_TOKEN) return true;
+  const received = request.headers["x-jslife-companion-token"];
+  if (typeof received !== "string") return false;
+  const actual = Buffer.from(received);
+  const expected = Buffer.from(COMPANION_TOKEN);
+  return actual.length === expected.length && timingSafeEqual(actual, expected);
 }
 
 function writeJson(response, status, value, origin) {
@@ -154,7 +175,16 @@ const server = createServer(async (request, response) => {
     return;
   }
 
+  if (origin && !isAllowedOrigin(origin)) {
+    writeJson(response, 403, { error: "Origin not allowed" }, origin);
+    return;
+  }
+
   if (request.method === "GET" && request.url === "/health") {
+    if (!isAuthorized(request)) {
+      writeJson(response, 401, { ok: false, service: "jslife-codex", auth: "pairing-required" }, origin);
+      return;
+    }
     writeJson(response, 200, { ok: true, service: "jslife-codex", auth: "ChatGPT via Codex" }, origin);
     return;
   }
@@ -164,8 +194,8 @@ const server = createServer(async (request, response) => {
     return;
   }
 
-  if (origin && !ALLOWED_ORIGINS.has(origin)) {
-    writeJson(response, 403, { error: "Origin not allowed" }, origin);
+  if (!isAuthorized(request)) {
+    writeJson(response, 401, { error: "Companion pairing required" }, origin);
     return;
   }
 

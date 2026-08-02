@@ -19,8 +19,10 @@ const STORAGE_DRAFT = "jslife-three-draft-v1";
 const STORAGE_CHAT = "jslife-codex-chat-v1";
 const STORAGE_THREAD = "jslife-codex-thread-v1";
 const STORAGE_ACTIVE_CHAT = "jslife-active-chat-v2";
+const STORAGE_COMPANION_TOKEN = "jslife-companion-token-v1";
 const STORAGE_PREFERENCES = "jslife-preferences-v1";
 const CODEX_BRIDGE = "http://127.0.0.1:4317";
+const COMPANION_DOWNLOAD_URL = import.meta.env.VITE_COMPANION_DOWNLOAD_URL || "";
 
 const PRESETS: Preset[] = [
   {
@@ -254,6 +256,10 @@ const chatTitle = (messages: ChatMessage[]) => {
   const firstRequest = messages.find((message) => message.role === "user")?.text.trim();
   return firstRequest ? `${firstRequest.slice(0, 34)}${firstRequest.length > 34 ? "…" : ""}` : "新しい会話";
 };
+const initialCompanionToken = () => {
+  if (typeof window === "undefined") return "";
+  return new URL(window.location.href).searchParams.get("companion_token") || localStorage.getItem(STORAGE_COMPANION_TOKEN) || "";
+};
 const normalizedProjectPath = (value: string) => value.trim().replace(/\\/g, "/").replace(/^\.\//, "");
 
 const buildProjectBrowserRows = (files: ProjectFile[], collapsedFolders: Set<string>): ProjectBrowserRow[] => {
@@ -324,6 +330,8 @@ export default function Playground() {
   const [chatInput, setChatInput] = useState("");
   const [chatBusy, setChatBusy] = useState(false);
   const [chatOnline, setChatOnline] = useState<boolean | null>(null);
+  const [companionNeedsPairing, setCompanionNeedsPairing] = useState(false);
+  const [companionToken] = useState(initialCompanionToken);
   const [chatProgress, setChatProgress] = useState("");
   const [codexThreadId, setCodexThreadId] = useState<string | null>(null);
   const [undoFiles, setUndoFiles] = useState<ProjectFile[] | null>(null);
@@ -381,6 +389,14 @@ export default function Playground() {
   useEffect(() => { codeRef.current = code; }, [code]);
   useEffect(() => { autoRunRef.current = autoRun; }, [autoRun]);
   useEffect(() => { chatConversationsRef.current = chatConversations; }, [chatConversations]);
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    const pairedToken = url.searchParams.get("companion_token");
+    if (!pairedToken) return;
+    localStorage.setItem(STORAGE_COMPANION_TOKEN, pairedToken);
+    url.searchParams.delete("companion_token");
+    window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
+  }, []);
   useEffect(() => {
     if (sidebarMode !== "library") return;
     const id = `project-${selectedProjectKey.replace(/[^a-z0-9_-]/gi, "-")}`;
@@ -602,12 +618,17 @@ export default function Playground() {
   const checkCodex = useCallback(async () => {
     setChatOnline(null);
     try {
-      const response = await fetch(`${CODEX_BRIDGE}/health`, { cache: "no-store" });
+      const response = await fetch(`${CODEX_BRIDGE}/health`, {
+        cache: "no-store",
+        headers: companionToken ? { "X-JSLIFE-Companion-Token": companionToken } : undefined,
+      });
+      setCompanionNeedsPairing(response.status === 401);
       setChatOnline(response.ok);
     } catch {
+      setCompanionNeedsPairing(false);
       setChatOnline(false);
     }
-  }, []);
+  }, [companionToken]);
 
   useEffect(() => {
     const timer = window.setTimeout(checkCodex, 0);
@@ -1054,7 +1075,10 @@ export default function Playground() {
     try {
       const response = await fetch(`${CODEX_BRIDGE}/chat`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          ...(companionToken ? { "X-JSLIFE-Companion-Token": companionToken } : {}),
+        },
         signal: controller.signal,
         body: JSON.stringify({
           message: requestText,
@@ -1201,6 +1225,12 @@ export default function Playground() {
     setCodexThreadId(conversation.threadId);
     setChatHistoryOpen(false);
     localStorage.setItem(STORAGE_ACTIVE_CHAT, conversation.id);
+  };
+
+  const pairCompanion = () => {
+    const returnUrl = new URL(window.location.href);
+    returnUrl.searchParams.delete("companion_token");
+    window.location.href = `jslife-companion://pair?return_url=${encodeURIComponent(returnUrl.toString())}`;
   };
 
   return (
@@ -1391,7 +1421,7 @@ export default function Playground() {
           <div className="chat-head">
             <div className="chat-title">
               <i className={chatOnline === true ? "online" : chatOnline === false ? "offline" : "checking"} />
-              <span><strong>CODEX PAIR</strong><small>{chatOnline === true ? "ChatGPTで接続済み" : chatOnline === false ? "ローカル接続なし" : "接続確認中"}</small></span>
+              <span><strong>CODEX PAIR</strong><small>{chatOnline === true ? "ChatGPTで接続済み" : chatOnline === false ? companionNeedsPairing ? "Companionのペアリングが必要" : "Companion未接続" : "接続確認中"}</small></span>
             </div>
             <div><button className={chatHistoryOpen ? "chat-history-active" : ""} onClick={() => setChatHistoryOpen((open) => !open)} title="Conversation history" aria-label="Conversation history">◷</button><button onClick={newChat} disabled={chatBusy} title="New chat" aria-label="New chat">＋</button><button onClick={() => setChatOpen(false)} title="Close">×</button></div>
           </div>
@@ -1411,9 +1441,9 @@ export default function Playground() {
           </section>}
 
           {chatOnline === false && <div className="chat-offline">
-            <span>Codex bridgeが停止しています。</span>
-            <button onClick={checkCodex}>再接続</button>
-            <code>npm run dev</code>
+            <span>{companionNeedsPairing ? "JSLIFE Companionとペアリングしてください。" : "JSLIFE Companionを起動してください。"}</span>
+            <button onClick={pairCompanion}>{companionNeedsPairing ? "ペアリング" : "Companionを開く"}</button>
+            {companionNeedsPairing ? <code>ChatGPT認証はCompanion側で管理されます</code> : COMPANION_DOWNLOAD_URL ? <a href={COMPANION_DOWNLOAD_URL}>Companionをダウンロード</a> : <code>未導入の場合はCompanionのインストールが必要です</code>}
           </div>}
 
           <div className="chat-messages">

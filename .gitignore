@@ -38,6 +38,9 @@ yarn-error.log*
 next-env.d.ts
 *.tsbuildinfo
 /dist/
+/dist-pages/
+/build-companion/
+/.companion-cache/
 /.wrangler/
 /outputs/
 /work/
