@@ -34,10 +34,40 @@ export type DraftRecord = {
   saved: boolean;
 };
 
+export type StoredChatFileAction = {
+  type: "write" | "delete" | "move";
+  path: string;
+  to?: string;
+  content?: string;
+  mimeType?: string;
+};
+
+export type StoredChatMessage = {
+  id: string;
+  role: "user" | "assistant";
+  text: string;
+  changes?: StoredChatFileAction[];
+  autoApplied?: boolean;
+  applied?: boolean;
+  validationError?: string;
+};
+
+export type ChatConversationRecord = {
+  id: string;
+  title: string;
+  threadId: string | null;
+  projectId: string | null;
+  projectName: string;
+  messages: StoredChatMessage[];
+  createdAt: string;
+  updatedAt: string;
+};
+
 const DB_NAME = "jslife-projects-v2";
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const PROJECTS = "projects";
 const DRAFT = "draft";
+const CHAT_CONVERSATIONS = "chat-conversations";
 
 const openDatabase = () => new Promise<IDBDatabase>((resolve, reject) => {
   const request = indexedDB.open(DB_NAME, DB_VERSION);
@@ -45,6 +75,7 @@ const openDatabase = () => new Promise<IDBDatabase>((resolve, reject) => {
     const database = request.result;
     if (!database.objectStoreNames.contains(PROJECTS)) database.createObjectStore(PROJECTS, { keyPath: "id" });
     if (!database.objectStoreNames.contains(DRAFT)) database.createObjectStore(DRAFT, { keyPath: "id" });
+    if (!database.objectStoreNames.contains(CHAT_CONVERSATIONS)) database.createObjectStore(CHAT_CONVERSATIONS, { keyPath: "id" });
   };
   request.onsuccess = () => resolve(request.result);
   request.onerror = () => reject(request.error ?? new Error("Could not open project storage"));
@@ -96,6 +127,34 @@ export async function putDraft(draft: DraftRecord): Promise<void> {
   const database = await openDatabase();
   try {
     await requestResult(database.transaction(DRAFT, "readwrite").objectStore(DRAFT).put(draft));
+  } finally {
+    database.close();
+  }
+}
+
+export async function listChatConversations(): Promise<ChatConversationRecord[]> {
+  const database = await openDatabase();
+  try {
+    const conversations = await requestResult(database.transaction(CHAT_CONVERSATIONS, "readonly").objectStore(CHAT_CONVERSATIONS).getAll()) as ChatConversationRecord[];
+    return conversations.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  } finally {
+    database.close();
+  }
+}
+
+export async function putChatConversation(conversation: ChatConversationRecord): Promise<void> {
+  const database = await openDatabase();
+  try {
+    await requestResult(database.transaction(CHAT_CONVERSATIONS, "readwrite").objectStore(CHAT_CONVERSATIONS).put(conversation));
+  } finally {
+    database.close();
+  }
+}
+
+export async function removeChatConversation(id: string): Promise<void> {
+  const database = await openDatabase();
+  try {
+    await requestResult(database.transaction(CHAT_CONVERSATIONS, "readwrite").objectStore(CHAT_CONVERSATIONS).delete(id));
   } finally {
     database.close();
   }

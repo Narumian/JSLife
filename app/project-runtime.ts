@@ -39,6 +39,12 @@ const resolvePath = (from: string, request: string, paths: Set<string>) => {
   return candidates.find((candidate) => paths.has(candidate)) ?? resolved;
 };
 
+const resolveProjectImport = (from: string, request: string, paths: Set<string>) => {
+  const resolved = resolvePath(from, request, paths);
+  if (!paths.has(resolved)) throw new Error(`${from}: project import not found: ${request}`);
+  return resolved;
+};
+
 const importBindings = (bindings: string, request: string): string => {
   const importedModule = `__require(${JSON.stringify(request)})`;
   const trimmed = bindings.trim();
@@ -75,11 +81,11 @@ const transformModule = (source: string, path: string, paths: Set<string>) => {
   });
   executable = executable.replace(/import\s+([^;\n]+?)\s+from\s+["']([^"']+)["'];?/g, (_statement, bindings: string, request: string) => {
     if (!request.startsWith(".")) throw new Error(`Unsupported import: ${request}`);
-    return importBindings(bindings, resolvePath(path, request, paths));
+    return importBindings(bindings, resolveProjectImport(path, request, paths));
   });
   executable = executable.replace(/import\s+["']([^"']+)["'];?/g, (_statement, request: string) => {
     if (!request.startsWith(".")) throw new Error(`Unsupported import: ${request}`);
-    return `__require(${JSON.stringify(resolvePath(path, request, paths))});`;
+    return `__require(${JSON.stringify(resolveProjectImport(path, request, paths))});`;
   });
 
   executable = executable.replace(/export\s+default\s+(async\s+)?function\s+([A-Za-z_$][\w$]*)/g, (_statement, asyncKeyword = "", name: string) => {
@@ -118,7 +124,36 @@ const transformModule = (source: string, path: string, paths: Set<string>) => {
   return `const asset = (request) => __asset(${JSON.stringify(path)}, request);\n${executable}\n${assignments}`;
 };
 
+export function validateProject(files: ProjectFile[], entry = "main.js") {
+  const paths = new Set<string>();
+  for (const file of files) {
+    if (!file.path || paths.has(file.path)) throw new Error(`Duplicate or empty project path: ${file.path || "(empty)"}`);
+    paths.add(file.path);
+  }
+  const entryFile = files.find((file) => file.path === entry);
+  if (!entryFile || entryFile.kind !== "text") throw new Error(`Project entry is missing: ${entry}`);
+
+  for (const file of files) {
+    if (file.kind !== "text") continue;
+    const extension = file.path.split(".").pop()?.toLowerCase();
+    if (extension === "json") {
+      try { JSON.parse(file.content); } catch (error) {
+        throw new Error(`${file.path}: ${error instanceof Error ? error.message : "Invalid JSON"}`);
+      }
+      continue;
+    }
+    if (extension !== "js" && extension !== "mjs") continue;
+    const transformed = transformModule(file.content, file.path, paths);
+    try {
+      new Function("__THREE", "__THREE_ADDONS", "mount", "viewport", "__asset", "__require", "__exports", `"use strict";\n${transformed}`);
+    } catch (error) {
+      throw new Error(`${file.path}: ${error instanceof Error ? error.message : "Invalid JavaScript"}`);
+    }
+  }
+}
+
 export function compileProject(files: ProjectFile[], entry: string, mount: HTMLDivElement, viewport: ResizeArgs): GraphicsRuntime {
+  validateProject(files, entry);
   const paths = new Set(files.map((file) => file.path));
   const fileMap = new Map(files.map((file) => [file.path, file]));
   const urls = new Map<string, string>();

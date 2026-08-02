@@ -111,6 +111,7 @@ If the user asks for a code change, or a concrete code change is the best answer
 - you may create JS, JSON, GLSL, or other text files, but cannot create binary assets;
 - preserve the main.js lifecycle functions;
 - dispose geometries, materials, textures, and renderer where appropriate.
+Before returning changes, lint the complete proposed project mentally: verify JavaScript syntax, JSON syntax, relative import paths, supported package imports, exported names, and the main.js lifecycle. Prefer a smaller valid change over a large speculative rewrite.
 Otherwise return action "none" and changes as an empty array.
 
 Project: ${projectName || "Untitled sketch"}
@@ -195,7 +196,7 @@ const server = createServer(async (request, response) => {
 
     let previewPath = null;
     let waitedSeconds = 0;
-    const timeout = setTimeout(() => controller.abort(new Error("Codex response timed out after 90 seconds")), 90_000);
+    const timeout = setTimeout(() => controller.abort(new Error("Codex response timed out after 180 seconds")), 180_000);
     const heartbeat = setInterval(() => {
       waitedSeconds += 15;
       if (!response.destroyed && !response.writableEnded) {

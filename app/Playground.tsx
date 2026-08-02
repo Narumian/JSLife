@@ -2,28 +2,23 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { packProject, unpackProject } from "./jslife-package";
-import { compileProject, disposeScene, type GraphicsRuntime, type PointerState, type ResizeArgs } from "./project-runtime";
-import { getDraft, listProjects, putDraft, putProject, removeProject, type ProjectFile, type ProjectRecord } from "./project-store";
+import { compileProject, disposeScene, validateProject, type GraphicsRuntime, type PointerState, type ResizeArgs } from "./project-runtime";
+import { getDraft, listChatConversations, listProjects, putChatConversation, putDraft, putProject, removeProject, type ChatConversationRecord, type ProjectFile, type ProjectRecord, type StoredChatFileAction, type StoredChatMessage } from "./project-store";
 
 type Preset = { name: string; accent: string; code: string };
 type LegacyProject = { id: string; name: string; code: string; updatedAt: string };
 type LegacyDraft = { projectName?: string; code?: string; activeProjectId?: string | null; saved?: boolean };
-type StudioPreferences = { chatOpen?: boolean; autoRun?: boolean; editorOpen?: boolean; openPaths?: string[] };
+type StudioPreferences = { chatOpen?: boolean; autoRun?: boolean; editorOpen?: boolean; openPaths?: string[]; sidebarMode?: "files" | "library" };
 type ProjectBrowserRow = { path: string; name: string; depth: number; kind: "folder" | "file"; file?: ProjectFile };
-type FileAction = { type: "write" | "delete" | "move"; path: string; to?: string; content?: string; mimeType?: string };
-type ChatMessage = {
-  id: string;
-  role: "user" | "assistant";
-  text: string;
-  changes?: FileAction[];
-  autoApplied?: boolean;
-};
+type FileAction = StoredChatFileAction;
+type ChatMessage = StoredChatMessage;
 type CodexResult = { message: string; action: "none" | "changes"; changes: FileAction[] };
 
 const STORAGE_LIBRARY = "jslife-library-v1";
 const STORAGE_DRAFT = "jslife-three-draft-v1";
 const STORAGE_CHAT = "jslife-codex-chat-v1";
 const STORAGE_THREAD = "jslife-codex-thread-v1";
+const STORAGE_ACTIVE_CHAT = "jslife-active-chat-v2";
 const STORAGE_PREFERENCES = "jslife-preferences-v1";
 const CODEX_BRIDGE = "http://127.0.0.1:4317";
 
@@ -215,9 +210,50 @@ export function dispose() {
   },
 ];
 
+const BLANK_PROJECT = `import * as THREE from "three";
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x080b0d);
+
+const camera = new THREE.PerspectiveCamera(50, 1, 0.1, 100);
+camera.position.z = 5;
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+mount.appendChild(renderer.domElement);
+
+const geometry = new THREE.BoxGeometry(1.5, 1.5, 1.5);
+const material = new THREE.MeshNormalMaterial();
+const mesh = new THREE.Mesh(geometry, material);
+scene.add(mesh);
+
+export function frame({ time }) {
+  mesh.rotation.x = time * 0.35;
+  mesh.rotation.y = time * 0.55;
+  renderer.render(scene, camera);
+}
+
+export function resize({ width, height, pixelRatio }) {
+  renderer.setPixelRatio(Math.min(pixelRatio, 2));
+  renderer.setSize(width, height, false);
+  camera.aspect = width / height;
+  camera.updateProjectionMatrix();
+}
+
+export function dispose() {
+  geometry.dispose();
+  material.dispose();
+  renderer.dispose();
+  renderer.domElement.remove();
+}`;
+
 const safeName = (value: string) => value.trim().replace(/[^a-z0-9-_]+/gi, "-").replace(/^-|-$/g, "") || "sketch";
 const mainFile = (content: string): ProjectFile => ({ path: "main.js", kind: "text", mimeType: "text/javascript", content });
 const isEditable = (file: ProjectFile) => file.kind === "text";
+const chatTitle = (messages: ChatMessage[]) => {
+  const firstRequest = messages.find((message) => message.role === "user")?.text.trim();
+  return firstRequest ? `${firstRequest.slice(0, 34)}${firstRequest.length > 34 ? "…" : ""}` : "新しい会話";
+};
 const normalizedProjectPath = (value: string) => value.trim().replace(/\\/g, "/").replace(/^\.\//, "");
 
 const buildProjectBrowserRows = (files: ProjectFile[], collapsedFolders: Set<string>): ProjectBrowserRow[] => {
@@ -266,7 +302,9 @@ export default function Playground() {
   const [openPaths, setOpenPaths] = useState<string[]>(["main.js"]);
   const [collapsedFolders, setCollapsedFolders] = useState<Set<string>>(new Set());
   const [library, setLibrary] = useState<ProjectRecord[]>([]);
-  const [libraryOpen, setLibraryOpen] = useState(false);
+  const [sidebarMode, setSidebarMode] = useState<"files" | "library">("files");
+  const [selectedProjectKey, setSelectedProjectKey] = useState("workspace");
+  const [previewCollapsedFolders, setPreviewCollapsedFolders] = useState<Set<string>>(new Set());
   const [codeSearchOpen, setCodeSearchOpen] = useState(false);
   const [codeSearchQuery, setCodeSearchQuery] = useState("");
   const [codeSearchIndex, setCodeSearchIndex] = useState(0);
@@ -280,6 +318,9 @@ export default function Playground() {
   const [editorOpen, setEditorOpen] = useState(true);
   const [chatOpen, setChatOpen] = useState(false);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  const [chatConversations, setChatConversations] = useState<ChatConversationRecord[]>([]);
+  const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
+  const [chatHistoryOpen, setChatHistoryOpen] = useState(false);
   const [chatInput, setChatInput] = useState("");
   const [chatBusy, setChatBusy] = useState(false);
   const [chatOnline, setChatOnline] = useState<boolean | null>(null);
@@ -300,8 +341,10 @@ export default function Playground() {
   const frameCount = useRef(0);
   const sizeRef = useRef({ width: 0, height: 0, pixelRatio: 1 });
   const chatEndRef = useRef<HTMLDivElement>(null);
+  const chatConversationsRef = useRef<ChatConversationRecord[]>([]);
   const draftReadyRef = useRef(false);
   const preferencesReadyRef = useRef(false);
+  const conversationsReadyRef = useRef(false);
   const codeRef = useRef(code);
   const autoRunRef = useRef(autoRun);
   const chatAbortRef = useRef<AbortController | null>(null);
@@ -309,12 +352,40 @@ export default function Playground() {
   const lines = useMemo(() => code.split("\n").length, [code]);
   const projectFiles = useMemo(() => files.map((file) => file.path === activePath && file.kind === "text" ? { ...file, content: code } : file), [activePath, code, files]);
   const projectBrowserRows = useMemo(() => buildProjectBrowserRows(projectFiles, collapsedFolders), [collapsedFolders, projectFiles]);
+  const projectSelectionKeys = useMemo(() => [
+    "workspace",
+    ...library.map((project) => `saved:${project.id}`),
+    "starter:blank",
+    ...PRESETS.map((_preset, index) => `starter:${index}`),
+  ], [library]);
+  const selectedProject = useMemo(() => {
+    if (selectedProjectKey.startsWith("saved:")) {
+      const project = library.find((candidate) => `saved:${candidate.id}` === selectedProjectKey);
+      if (project) return { name: project.name, files: project.files, detail: `Saved ${new Date(project.updatedAt).toLocaleDateString()}` };
+    }
+    if (selectedProjectKey === "starter:blank") return { name: "Blank Three.js", files: [mainFile(BLANK_PROJECT)], detail: "Starter · Three.js" };
+    if (selectedProjectKey.startsWith("starter:")) {
+      const preset = PRESETS[Number(selectedProjectKey.slice("starter:".length))];
+      if (preset) return { name: preset.name, files: [mainFile(preset.code)], detail: "Starter · Three.js" };
+    }
+    return { name: projectName, files: projectFiles, detail: `Workspace · ${saved ? "saved" : "unsaved"}` };
+  }, [library, projectFiles, projectName, saved, selectedProjectKey]);
+  const selectedProjectRows = useMemo(
+    () => buildProjectBrowserRows(selectedProject.files, previewCollapsedFolders),
+    [previewCollapsedFolders, selectedProject.files],
+  );
   const openFiles = useMemo(() => openPaths.map((path) => projectFiles.find((file) => file.path === path && file.kind === "text")).filter((file): file is ProjectFile & { kind: "text" } => Boolean(file)), [openPaths, projectFiles]);
   const codeSearchMatches = useMemo(() => findCodeMatches(code, codeSearchQuery), [code, codeSearchQuery]);
   const activeCodeSearchIndex = codeSearchMatches.length ? codeSearchIndex % codeSearchMatches.length : 0;
 
   useEffect(() => { codeRef.current = code; }, [code]);
   useEffect(() => { autoRunRef.current = autoRun; }, [autoRun]);
+  useEffect(() => { chatConversationsRef.current = chatConversations; }, [chatConversations]);
+  useEffect(() => {
+    if (sidebarMode !== "library") return;
+    const id = `project-${selectedProjectKey.replace(/[^a-z0-9_-]/gi, "-")}`;
+    document.getElementById(id)?.scrollIntoView({ block: "nearest" });
+  }, [selectedProjectKey, sidebarMode]);
   useEffect(() => {
     if (!codeSearchOpen) return;
     const timer = window.setTimeout(() => codeSearchRef.current?.focus(), 0);
@@ -354,13 +425,14 @@ export default function Playground() {
 
   const runSource = useCallback((sourceFiles: ProjectFile[], entry = "main.js") => {
     const mount = mountRef.current;
-    if (!mount) return;
+    if (!mount) return "Preview mount is unavailable";
     teardown();
     try {
       const viewport = currentViewport();
       const runtime = compileProject(sourceFiles, entry, mount, viewport);
       runtimeRef.current = runtime;
       runtime.resize?.(viewport);
+      runtime.frame?.({ time: 0, delta: 0, frame: 0, pointer: pointer.current });
       sizeRef.current = viewport;
       setResolution({ width: viewport.width, height: viewport.height });
       const now = performance.now();
@@ -369,9 +441,12 @@ export default function Playground() {
       setElapsed(0);
       setError(null);
       setRunning(true);
+      return null;
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Import error");
+      const message = caught instanceof Error ? caught.message : "Import error";
+      setError(message);
       setRunning(false);
+      return message;
     }
   }, [currentViewport, teardown]);
 
@@ -384,6 +459,7 @@ export default function Playground() {
       const runtime = compileProject(projectFiles, "main.js", mount, viewport);
       runtimeRef.current = runtime;
       runtime.resize?.(viewport);
+      runtime.frame?.({ time: 0, delta: 0, frame: 0, pointer: pointer.current });
       sizeRef.current = viewport;
       setResolution({ width: viewport.width, height: viewport.height });
       setError(null);
@@ -441,14 +517,40 @@ export default function Playground() {
             setSaved(draft.saved);
           }
         }
-        const storedChat = JSON.parse(localStorage.getItem(STORAGE_CHAT) ?? "[]") as ChatMessage[];
-        if (!cancelled && Array.isArray(storedChat)) setChatMessages(storedChat);
-        if (!cancelled) setCodexThreadId(localStorage.getItem(STORAGE_THREAD));
+        const legacyMessages = JSON.parse(localStorage.getItem(STORAGE_CHAT) ?? "[]") as ChatMessage[];
+        const legacyThreadId = localStorage.getItem(STORAGE_THREAD);
+        let conversations = await listChatConversations();
+        if (!conversations.length) {
+          const now = new Date().toISOString();
+          const migrated: ChatConversationRecord = {
+            id: crypto.randomUUID(),
+            title: chatTitle(Array.isArray(legacyMessages) ? legacyMessages : []),
+            threadId: legacyThreadId,
+            projectId: draft?.projectId ?? null,
+            projectName: draft?.name || PRESETS[0].name,
+            messages: Array.isArray(legacyMessages) ? legacyMessages : [],
+            createdAt: now,
+            updatedAt: now,
+          };
+          await putChatConversation(migrated);
+          conversations = [migrated];
+        }
+        const storedActiveId = localStorage.getItem(STORAGE_ACTIVE_CHAT);
+        const activeConversation = conversations.find((conversation) => conversation.id === storedActiveId) ?? conversations[0];
+        if (!cancelled && activeConversation) {
+          setChatConversations(conversations);
+          setActiveConversationId(activeConversation.id);
+          setChatMessages(activeConversation.messages);
+          setCodexThreadId(activeConversation.threadId);
+          localStorage.setItem(STORAGE_ACTIVE_CHAT, activeConversation.id);
+          conversationsReadyRef.current = true;
+        }
         const preferences = JSON.parse(localStorage.getItem(STORAGE_PREFERENCES) ?? "{}") as StudioPreferences;
         if (!cancelled) {
           setChatOpen(preferences.chatOpen ?? false);
           setAutoRun(preferences.autoRun ?? false);
           setEditorOpen(preferences.editorOpen ?? true);
+          setSidebarMode(preferences.sidebarMode === "library" ? "library" : "files");
           if (Array.isArray(preferences.openPaths)) {
             const restoredOpenPaths = preferences.openPaths.filter((path) => sourceToRestore.some((file) => file.path === path && file.kind === "text"));
             setOpenPaths(restoredOpenPaths.length ? restoredOpenPaths : [draft?.entry || "main.js"]);
@@ -473,8 +575,29 @@ export default function Playground() {
 
   useEffect(() => {
     if (!preferencesReadyRef.current) return;
-    localStorage.setItem(STORAGE_PREFERENCES, JSON.stringify({ chatOpen, autoRun, editorOpen, openPaths }));
-  }, [autoRun, chatOpen, editorOpen, openPaths]);
+    localStorage.setItem(STORAGE_PREFERENCES, JSON.stringify({ chatOpen, autoRun, editorOpen, openPaths, sidebarMode }));
+  }, [autoRun, chatOpen, editorOpen, openPaths, sidebarMode]);
+
+  useEffect(() => {
+    if (!conversationsReadyRef.current || !activeConversationId) return;
+    const timer = window.setTimeout(() => {
+      const existing = chatConversationsRef.current.find((conversation) => conversation.id === activeConversationId);
+      if (!existing) return;
+      const updated: ChatConversationRecord = {
+        ...existing,
+        title: chatTitle(chatMessages),
+        threadId: codexThreadId,
+        messages: chatMessages,
+        updatedAt: new Date().toISOString(),
+      };
+      const next = [updated, ...chatConversationsRef.current.filter((conversation) => conversation.id !== activeConversationId)];
+      chatConversationsRef.current = next;
+      setChatConversations(next);
+      void putChatConversation(updated);
+      localStorage.setItem(STORAGE_ACTIVE_CHAT, activeConversationId);
+    }, 180);
+    return () => window.clearTimeout(timer);
+  }, [activeConversationId, chatMessages, codexThreadId]);
 
   const checkCodex = useCallback(async () => {
     setChatOnline(null);
@@ -553,6 +676,7 @@ export default function Playground() {
     const next = [project, ...library.filter((item) => item.id !== id)];
     setLibrary(next);
     setActiveProjectId(id);
+    setSelectedProjectKey(`saved:${id}`);
     setSaved(true);
   };
 
@@ -565,8 +689,9 @@ export default function Playground() {
     setOpenPaths([project.entry]);
     setCode(entryFile.content);
     setActiveProjectId(project.id);
+    setSelectedProjectKey(`saved:${project.id}`);
     setSaved(true);
-    setLibraryOpen(false);
+    setSidebarMode("files");
     window.setTimeout(() => runSource(project.files, project.entry), 0);
   };
 
@@ -686,8 +811,66 @@ export default function Playground() {
     setOpenPaths(["main.js"]);
     setCode(preset.code);
     setActiveProjectId(null);
+    setSelectedProjectKey(`starter:${index}`);
     setSaved(false);
+    setSidebarMode("files");
     runSource(nextFiles);
+  };
+
+  const createBlankProject = () => {
+    if (!saved && !window.confirm("Discard the current unsaved changes and create a blank project?")) return;
+    const nextFiles = [mainFile(BLANK_PROJECT)];
+    setPresetIndex(0);
+    setProjectName("Untitled Project");
+    setFiles(nextFiles);
+    setActivePath("main.js");
+    setOpenPaths(["main.js"]);
+    setCode(BLANK_PROJECT);
+    setActiveProjectId(null);
+    setSelectedProjectKey("starter:blank");
+    setUndoFiles(null);
+    setSaved(false);
+    setSidebarMode("files");
+    runSource(nextFiles);
+  };
+
+  const openProjectBrowser = () => {
+    setSidebarMode("library");
+    setEditorOpen(true);
+  };
+
+  const activateProjectSelection = (key = selectedProjectKey) => {
+    if (key === "workspace") {
+      setSidebarMode("files");
+      return;
+    }
+    if (key.startsWith("saved:")) {
+      const project = library.find((candidate) => `saved:${candidate.id}` === key);
+      if (project) loadProject(project);
+      return;
+    }
+    if (key === "starter:blank") {
+      createBlankProject();
+      return;
+    }
+    if (key.startsWith("starter:")) {
+      const index = Number(key.slice("starter:".length));
+      if (PRESETS[index]) choosePreset(index);
+    }
+  };
+
+  const handleProjectBrowserKeyDown = (event: React.KeyboardEvent<HTMLElement>) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      activateProjectSelection();
+      return;
+    }
+    if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+    event.preventDefault();
+    const currentIndex = Math.max(0, projectSelectionKeys.indexOf(selectedProjectKey));
+    const direction = event.key === "ArrowDown" ? 1 : -1;
+    const nextIndex = Math.min(projectSelectionKeys.length - 1, Math.max(0, currentIndex + direction));
+    setSelectedProjectKey(projectSelectionKeys[nextIndex]);
   };
 
   const toggleRunning = () => {
@@ -741,7 +924,8 @@ export default function Playground() {
         });
         await Promise.all(projects.map(putProject));
         setLibrary([...projects, ...library.filter((item) => !projects.some((candidate) => candidate.id === item.id))]);
-        setLibraryOpen(true);
+        setSidebarMode("library");
+        setEditorOpen(true);
       } else {
         const text = await file.text();
         const nextFiles = [mainFile(text)];
@@ -795,20 +979,11 @@ export default function Playground() {
     }
   };
 
-  const persistChat = (messages: ChatMessage[]) => {
-    setChatMessages(messages);
-    localStorage.setItem(STORAGE_CHAT, JSON.stringify(messages));
-  };
-
   const appendChat = (message: ChatMessage) => {
-    setChatMessages((current) => {
-      const next = [...current, message];
-      localStorage.setItem(STORAGE_CHAT, JSON.stringify(next));
-      return next;
-    });
+    setChatMessages((current) => [...current, message]);
   };
 
-  const applyFileChanges = (changes: FileAction[], baseFiles = projectFiles) => {
+  const applyFileChanges = (changes: FileAction[], baseFiles = projectFiles): string | null => {
     let next = [...baseFiles];
     for (const change of changes) {
       const path = normalizedProjectPath(change.path);
@@ -829,6 +1004,19 @@ export default function Playground() {
       const index = next.findIndex((file) => file.path === path);
       if (index === -1) next.push(replacement); else next[index] = replacement;
     }
+    try {
+      validateProject(next, "main.js");
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : "Project validation failed";
+      setError(`AI change blocked by lint: ${message}`);
+      return message;
+    }
+    const runtimeError = runSource(next);
+    if (runtimeError) {
+      runSource(baseFiles);
+      setError(`AI change blocked by runtime check: ${runtimeError}`);
+      return runtimeError;
+    }
     setUndoFiles(baseFiles);
     setFiles(next);
     const current = next.find((file) => file.path === activePath);
@@ -839,7 +1027,14 @@ export default function Playground() {
       if (entryFile?.kind === "text") setCode(entryFile.content);
     }
     setSaved(false);
-    if (!autoRun) window.setTimeout(() => runSource(next), 0);
+    return null;
+  };
+
+  const applyChatChanges = (messageId: string, changes: FileAction[]) => {
+    const validationError = applyFileChanges(changes);
+    setChatMessages((current) => current.map((message) => message.id === messageId
+      ? { ...message, applied: validationError === null, validationError: validationError || undefined }
+      : message));
   };
 
   const sendChat = async () => {
@@ -899,18 +1094,21 @@ export default function Playground() {
         if (event.type === "status" && event.text) setChatProgress(event.text);
         if (event.type === "thread" && event.threadId) {
           setCodexThreadId(event.threadId);
-          localStorage.setItem(STORAGE_THREAD, event.threadId);
         }
         if (event.type === "result" && event.result) {
           const proposal = event.result.action === "changes" ? event.result.changes : undefined;
-          const autoApplied = Boolean(proposal?.length && autoRunRef.current && codeRef.current === code);
-          if (proposal?.length && autoApplied) applyFileChanges(proposal, projectFiles);
+          const messageId = crypto.randomUUID();
+          const shouldAutoApply = Boolean(proposal?.length && autoRunRef.current && codeRef.current === code);
+          const validationError = proposal?.length && shouldAutoApply ? applyFileChanges(proposal, projectFiles) : null;
+          const autoApplied = shouldAutoApply && validationError === null;
           appendChat({
-            id: crypto.randomUUID(),
+            id: messageId,
             role: "assistant",
             text: event.result.message,
-            changes: autoApplied ? undefined : proposal,
+            changes: proposal,
             autoApplied,
+            applied: autoApplied,
+            validationError: validationError || undefined,
           });
         }
         if (event.type === "error") throw new Error(event.message || "Codex request failed");
@@ -950,22 +1148,68 @@ export default function Playground() {
     if (current?.kind === "text") setCode(current.content);
     setUndoFiles(null);
     setSaved(false);
-    if (!autoRun) runSource(previous);
+    runSource(previous);
+  };
+
+  const saveCurrentConversation = () => {
+    if (!activeConversationId) return;
+    const existing = chatConversationsRef.current.find((conversation) => conversation.id === activeConversationId);
+    if (!existing) return;
+    const updated: ChatConversationRecord = {
+      ...existing,
+      title: chatTitle(chatMessages),
+      threadId: codexThreadId,
+      messages: chatMessages,
+      updatedAt: new Date().toISOString(),
+    };
+    const next = [updated, ...chatConversationsRef.current.filter((conversation) => conversation.id !== activeConversationId)];
+    chatConversationsRef.current = next;
+    setChatConversations(next);
+    void putChatConversation(updated);
   };
 
   const newChat = () => {
-    persistChat([]);
+    if (chatBusy) return;
+    saveCurrentConversation();
+    const now = new Date().toISOString();
+    const conversation: ChatConversationRecord = {
+      id: crypto.randomUUID(),
+      title: "新しい会話",
+      threadId: null,
+      projectId: activeProjectId,
+      projectName,
+      messages: [],
+      createdAt: now,
+      updatedAt: now,
+    };
+    const next = [conversation, ...chatConversationsRef.current];
+    chatConversationsRef.current = next;
+    setChatConversations(next);
+    setActiveConversationId(conversation.id);
+    setChatMessages([]);
     setCodexThreadId(null);
-    localStorage.removeItem(STORAGE_THREAD);
+    setChatHistoryOpen(false);
+    localStorage.setItem(STORAGE_ACTIVE_CHAT, conversation.id);
+    void putChatConversation(conversation);
+  };
+
+  const selectChatConversation = (conversation: ChatConversationRecord) => {
+    if (chatBusy || conversation.id === activeConversationId) return;
+    saveCurrentConversation();
+    setActiveConversationId(conversation.id);
+    setChatMessages(conversation.messages);
+    setCodexThreadId(conversation.threadId);
+    setChatHistoryOpen(false);
+    localStorage.setItem(STORAGE_ACTIVE_CHAT, conversation.id);
   };
 
   return (
-    <main className={`studio ${chatOpen ? "chat-open" : ""} ${editorOpen ? "" : "editor-closed"}`}>
+    <main className={`studio ${chatOpen ? "chat-open" : ""} ${editorOpen ? "" : "editor-closed"} ${sidebarMode === "library" ? "sidebar-library" : ""}`}>
       <input ref={importRef} className="visually-hidden" type="file" accept=".js,.json,.jslife,text/javascript,application/json,application/x-jslife-project" onChange={importFile} />
       <input ref={assetRef} className="visually-hidden" type="file" multiple onChange={addAssets} />
       <header className="topbar">
         <div className="brand"><span className="brand-mark">J</span><span>JSLIFE</span></div>
-        <nav className="main-nav" aria-label="Main navigation"><button className={!chatOpen ? "nav-active" : ""} onClick={() => setChatOpen(false)}>Studio</button><button onClick={() => setLibraryOpen(true)}>Library</button><button className={chatOpen ? "nav-active" : ""} onClick={() => setChatOpen(true)}>Codex</button></nav>
+        <nav className="main-nav" aria-label="Main navigation"><button className={!chatOpen && sidebarMode === "files" ? "nav-active" : ""} onClick={() => { setChatOpen(false); setSidebarMode("files"); setEditorOpen(true); }}>Studio</button><button className={sidebarMode === "library" ? "nav-active" : ""} onClick={openProjectBrowser}>Library</button><button className={chatOpen ? "nav-active" : ""} onClick={() => setChatOpen(true)}>Codex</button></nav>
         <div className="top-actions">
           <span className={`save-state ${saved ? "saved" : ""}`}><i />{saved ? "Saved in library" : "Unsaved changes"}</span>
           <button className="text-button" onClick={() => importRef.current?.click()}>Import</button>
@@ -977,15 +1221,15 @@ export default function Playground() {
       </header>
 
       <section className="projectbar">
-        <div className="project-title"><button aria-label="Open library" onClick={() => setLibraryOpen(true)}>☷</button><div><input value={projectName} onChange={(event) => { setProjectName(event.target.value); setSaved(false); }} aria-label="Project name" /><span>Three.js · JavaScript module</span></div></div>
+        <div className="project-title"><button aria-label="Open project browser" onClick={openProjectBrowser}>☷</button><div><input value={projectName} onChange={(event) => { setProjectName(event.target.value); setSaved(false); }} aria-label="Project name" /><span>Three.js · JavaScript module</span></div></div>
         <div className="engine-status"><i /> THREE.JS <b>r185</b></div>
         <div className="project-meta"><span>{fps} FPS</span><span>{resolution.width} × {resolution.height}</span><button onClick={() => stageRef.current?.requestFullscreen?.()} aria-label="Enter fullscreen">⛶</button></div>
       </section>
 
       <section className="workspace">
         <aside className="rail" aria-label="Studio tools">
-          <button className={editorOpen ? "rail-active" : ""} aria-label={editorOpen ? "Hide code editor" : "Show code editor"} aria-pressed={editorOpen} onClick={toggleEditor} title={editorOpen ? "Hide code editor" : "Show code editor"}><Icon>⌘</Icon></button>
-          <button aria-label="Library" onClick={() => setLibraryOpen(true)}><Icon>▤</Icon></button>
+          <button className={editorOpen && sidebarMode === "library" ? "rail-active" : ""} aria-label="Library" aria-pressed={editorOpen && sidebarMode === "library"} onClick={openProjectBrowser}><Icon>▤</Icon></button>
+          <button className={editorOpen && sidebarMode === "files" ? "rail-active" : ""} aria-label="Project files" aria-pressed={editorOpen && sidebarMode === "files"} onClick={() => { if (editorOpen && sidebarMode === "files") toggleEditor(); else { setSidebarMode("files"); setEditorOpen(true); } }} title="Project files"><Icon>⌘</Icon></button>
           <button aria-label="Import" onClick={() => importRef.current?.click()}><Icon>⇣</Icon></button>
           <button aria-label="Add assets" onClick={() => assetRef.current?.click()} title="Add assets"><Icon>◇</Icon></button>
           <button className={chatOpen ? "rail-ai-active" : ""} aria-label="Codex chat" onClick={() => setChatOpen((open) => !open)}><Icon>✦</Icon></button>
@@ -993,36 +1237,84 @@ export default function Playground() {
         </aside>
 
         <section className="editor-panel" aria-label="JavaScript module editor">
-          <div className="panel-heading"><span>EDITOR</span><div><button className="asset-add" onClick={addTextFile} title="New text file">＋ file</button><button className="asset-add" onClick={() => assetRef.current?.click()} title="Add assets">＋ asset</button><button className="editor-code-search" onClick={openCodeSearch} title="Find in code (⌘F)" aria-label="Find in code">⌕ <kbd>⌘F</kbd></button></div></div>
+          <div className="panel-heading"><span>{sidebarMode === "library" ? "PROJECTS" : "EDITOR"}</span><div>{sidebarMode === "library" ? <><button className="asset-add" onClick={createBlankProject}>＋ new</button><button className="asset-add" onClick={() => importRef.current?.click()}>Import</button></> : <><button className="asset-add" onClick={addTextFile} title="New text file">＋ file</button><button className="asset-add" onClick={() => assetRef.current?.click()} title="Add assets">＋ asset</button><button className="editor-code-search" onClick={openCodeSearch} title="Find in code (⌘F)" aria-label="Find in code">⌕ <kbd>⌘F</kbd></button></>}</div></div>
           <div className="editor-body">
-            <aside className="file-browser" aria-label="Project file browser">
-              <div className="file-browser-title"><span>JSLIFE</span><small>{projectFiles.length}</small></div>
-              <div className="file-tree">
-                {projectBrowserRows.map((row) => row.kind === "folder" ? (
-                  <button
-                    key={`folder:${row.path}`}
-                    className="file-tree-folder"
-                    style={{ paddingLeft: 9 + row.depth * 12 }}
-                    onClick={() => setCollapsedFolders((current) => {
-                      const next = new Set(current);
-                      if (next.has(row.path)) next.delete(row.path); else next.add(row.path);
-                      return next;
-                    })}
-                    title={row.path}
-                  ><span>{collapsedFolders.has(row.path) ? "▸" : "▾"}</span>{row.name}</button>
-                ) : (
-                  <div key={`file:${row.path}`} className={`file-tree-row${row.path === activePath ? " file-tree-active" : ""}`} style={{ paddingLeft: 21 + row.depth * 12 }} title={row.path}>
-                    <button className="file-tree-open" onClick={() => row.file?.kind === "text" && selectFile(row.path)} disabled={row.file?.kind !== "text"}>
-                      <span className={`file-kind file-kind-${row.file?.kind}`}>{row.file?.kind === "asset" ? "◇" : row.path.match(/\.(glsl|frag|vert)$/i) ? "◈" : "JS"}</span>
-                      <span>{row.name}</span>
-                    </button>
-                    {row.path !== "main.js" && <span className="file-tree-actions"><button onClick={() => renameProjectFile(row.path)} aria-label={`Rename ${row.path}`} title="Rename">✎</button><button onClick={() => deleteProjectFile(row.path)} aria-label={`Delete ${row.path}`} title="Delete">×</button></span>}
+            <aside className="file-browser" aria-label={sidebarMode === "library" ? "Project browser" : "Project file browser"}>
+              {sidebarMode === "files" ? <>
+                <div className="file-browser-title"><span>JSLIFE</span><small>{projectFiles.length}</small></div>
+                <div className="file-tree">
+                  {projectBrowserRows.map((row) => row.kind === "folder" ? (
+                    <button
+                      key={`folder:${row.path}`}
+                      className="file-tree-folder"
+                      style={{ paddingLeft: 9 + row.depth * 12 }}
+                      onClick={() => setCollapsedFolders((current) => {
+                        const next = new Set(current);
+                        if (next.has(row.path)) next.delete(row.path); else next.add(row.path);
+                        return next;
+                      })}
+                      title={row.path}
+                    ><span>{collapsedFolders.has(row.path) ? "▸" : "▾"}</span>{row.name}</button>
+                  ) : (
+                    <div key={`file:${row.path}`} className={`file-tree-row${row.path === activePath ? " file-tree-active" : ""}`} style={{ paddingLeft: 21 + row.depth * 12 }} title={row.path}>
+                      <button className="file-tree-open" onClick={() => row.file?.kind === "text" && selectFile(row.path)} disabled={row.file?.kind !== "text"}>
+                        <span className={`file-kind file-kind-${row.file?.kind}`}>{row.file?.kind === "asset" ? "◇" : row.path.match(/\.(glsl|frag|vert)$/i) ? "◈" : "JS"}</span>
+                        <span>{row.name}</span>
+                      </button>
+                      {row.path !== "main.js" && <span className="file-tree-actions"><button onClick={() => renameProjectFile(row.path)} aria-label={`Rename ${row.path}`} title="Rename">✎</button><button onClick={() => deleteProjectFile(row.path)} aria-label={`Delete ${row.path}`} title="Delete">×</button></span>}
+                    </div>
+                  ))}
+                </div>
+                <div className="file-browser-summary">{projectFiles.filter(isEditable).length} text · {projectFiles.filter((file) => file.kind === "asset").length} assets</div>
+              </> : <>
+                <div className="project-browser-scroll" role="listbox" aria-label="Projects" aria-activedescendant={`project-${selectedProjectKey.replace(/[^a-z0-9_-]/gi, "-")}`} tabIndex={0} onKeyDown={handleProjectBrowserKeyDown}>
+                  <div className="project-browser-section"><span>WORKSPACE</span>
+                    <button id="project-workspace" role="option" aria-selected={selectedProjectKey === "workspace"} className={`project-browser-item${selectedProjectKey === "workspace" ? " project-browser-current" : ""}`} onClick={() => setSelectedProjectKey("workspace")} onDoubleClick={() => activateProjectSelection("workspace")}><i /><span><strong>{projectName}</strong><small>{projectFiles.length} files · {saved ? "saved" : "unsaved"}</small></span></button>
                   </div>
-                ))}
-              </div>
-              <div className="file-browser-summary">{projectFiles.filter(isEditable).length} text · {projectFiles.filter((file) => file.kind === "asset").length} assets</div>
+                  <div className="project-browser-section"><span>SAVED PROJECTS</span>
+                    {!library.length && <p className="project-browser-empty">Save a project to add it here.</p>}
+                    {library.map((project) => { const key = `saved:${project.id}`; return <div className={`project-browser-entry${selectedProjectKey === key ? " project-browser-selected" : ""}${project.id === activeProjectId ? " project-browser-loaded" : ""}`} key={project.id}>
+                      <button id={`project-${key.replace(/[^a-z0-9_-]/gi, "-")}`} role="option" aria-selected={selectedProjectKey === key} className="project-browser-item" onClick={() => setSelectedProjectKey(key)} onDoubleClick={() => activateProjectSelection(key)}><i /><span><strong>{project.name}</strong><small>{project.files.length} files · {new Date(project.updatedAt).toLocaleDateString()}</small></span></button>
+                      <button className="project-browser-delete" onClick={() => { void removeProject(project.id); setLibrary((current) => current.filter((item) => item.id !== project.id)); if (selectedProjectKey === key) setSelectedProjectKey("workspace"); }} aria-label={`Delete ${project.name}`} title="Delete">×</button>
+                    </div>})}
+                  </div>
+                  <div className="project-browser-section"><span>STARTERS</span>
+                    <button id="project-starter-blank" role="option" aria-selected={selectedProjectKey === "starter:blank"} className={`project-browser-item starter-blank${selectedProjectKey === "starter:blank" ? " project-browser-current" : ""}`} onClick={() => setSelectedProjectKey("starter:blank")} onDoubleClick={() => activateProjectSelection("starter:blank")}><i>＋</i><span><strong>Blank Three.js</strong><small>Minimal scene</small></span></button>
+                    {PRESETS.map((preset, index) => { const key = `starter:${index}`; return <button id={`project-starter-${index}`} role="option" aria-selected={selectedProjectKey === key} className={`project-browser-item${selectedProjectKey === key ? " project-browser-current" : ""}`} key={preset.name} onClick={() => setSelectedProjectKey(key)} onDoubleClick={() => activateProjectSelection(key)}><i style={{ "--swatch": preset.accent } as React.CSSProperties} /><span><strong>{preset.name}</strong><small>Three.js starter</small></span></button>})}
+                  </div>
+                </div>
+                <div className="project-browser-footer"><button onClick={exportLibrary} disabled={!library.length}>Backup JSON</button></div>
+              </>}
             </aside>
             <div className="code-workspace">
+              {sidebarMode === "library" ? <section className="project-directory-view" aria-label={`${selectedProject.name} directory`}>
+                <header className="project-directory-head">
+                  <div><span>SELECTED PROJECT</span><strong>{selectedProject.name}</strong><small>{selectedProject.detail}</small></div>
+                  <button onClick={() => activateProjectSelection()}>Open project</button>
+                </header>
+                <div className="project-directory-tree">
+                  <div className="project-directory-root"><span>▾</span><b>{safeName(selectedProject.name)}</b><small>{selectedProject.files.length} files</small></div>
+                  {selectedProjectRows.map((row) => row.kind === "folder" ? (
+                    <button
+                      key={`preview-folder:${row.path}`}
+                      className="project-directory-folder"
+                      style={{ paddingLeft: 22 + row.depth * 18 }}
+                      onClick={() => setPreviewCollapsedFolders((current) => {
+                        const next = new Set(current);
+                        if (next.has(row.path)) next.delete(row.path); else next.add(row.path);
+                        return next;
+                      })}
+                      title={row.path}
+                    ><span>{previewCollapsedFolders.has(row.path) ? "▸" : "▾"}</span><i>▱</i>{row.name}</button>
+                  ) : (
+                    <div key={`preview-file:${row.path}`} className="project-directory-file" style={{ paddingLeft: 40 + row.depth * 18 }} title={row.path}>
+                      <span className={`file-kind file-kind-${row.file?.kind}`}>{row.file?.kind === "asset" ? "◇" : row.path.match(/\.(glsl|frag|vert)$/i) ? "◈" : row.path.endsWith(".json") ? "{}" : "JS"}</span>
+                      <span>{row.name}</span><small>{row.file?.kind === "asset" ? "asset" : row.file?.mimeType}</small>
+                    </div>
+                  ))}
+                </div>
+                <footer className="project-directory-status"><span>↑↓ select project</span><span>double-click to load</span><span>{selectedProject.files.filter(isEditable).length} text · {selectedProject.files.filter((file) => file.kind === "asset").length} assets</span></footer>
+              </section> : <>
               <div className="tabs">{openFiles.map((file) => <div key={file.path} className={file.path === activePath ? "tab-active" : "file-tab"}><button className="tab-label" onClick={() => selectFile(file.path)} title={file.path}><i style={{ background: PRESETS[presetIndex].accent }} /><span>{file.path.split("/").pop()}</span>{file.path === activePath && !saved && <b>●</b>}</button><button className="tab-close" onClick={() => closeFileTab(file.path)} aria-label={`Close ${file.path}`} title="Close tab">×</button></div>)}<button className="add-tab" onClick={addTextFile} aria-label="New file">＋</button></div>
               {codeSearchOpen && <div className="code-search" role="search">
                 <span aria-hidden="true">⌕</span>
@@ -1067,6 +1359,7 @@ export default function Playground() {
                 />
               </div>
               <div className="editor-status"><span>{activePath}</span><span>{lines} lines</span><span>UTF-8</span><span className="context-ready">● {projectFiles.length} files ready</span></div>
+              </>}
             </div>
           </div>
         </section>
@@ -1100,8 +1393,22 @@ export default function Playground() {
               <i className={chatOnline === true ? "online" : chatOnline === false ? "offline" : "checking"} />
               <span><strong>CODEX PAIR</strong><small>{chatOnline === true ? "ChatGPTで接続済み" : chatOnline === false ? "ローカル接続なし" : "接続確認中"}</small></span>
             </div>
-            <div><button onClick={newChat} title="New chat">＋</button><button onClick={() => setChatOpen(false)} title="Close">×</button></div>
+            <div><button className={chatHistoryOpen ? "chat-history-active" : ""} onClick={() => setChatHistoryOpen((open) => !open)} title="Conversation history" aria-label="Conversation history">◷</button><button onClick={newChat} disabled={chatBusy} title="New chat" aria-label="New chat">＋</button><button onClick={() => setChatOpen(false)} title="Close">×</button></div>
           </div>
+
+          {chatHistoryOpen && <section className="chat-history" aria-label="Conversation history">
+            <div className="chat-history-heading"><span>CONVERSATIONS</span><small>{chatConversations.length}</small></div>
+            <div className="chat-history-list">
+              {chatConversations.map((conversation) => <button
+                key={conversation.id}
+                className={conversation.id === activeConversationId ? "chat-history-current" : ""}
+                onClick={() => selectChatConversation(conversation)}
+                disabled={chatBusy}
+              >
+                <i>✦</i><span><strong>{conversation.title}</strong><small>{conversation.projectName} · {new Date(conversation.updatedAt).toLocaleString()}</small></span>
+              </button>)}
+            </div>
+          </section>}
 
           {chatOnline === false && <div className="chat-offline">
             <span>Codex bridgeが停止しています。</span>
@@ -1118,10 +1425,10 @@ export default function Playground() {
             {chatMessages.map((message) => <article key={message.id} className={`chat-message ${message.role}`}>
               <small>{message.role === "user" ? "YOU" : "CODEX"}</small>
               <p>{message.text}</p>
-              {message.autoApplied && <div className="auto-applied">✓ Auto-runで適用済み</div>}
               {message.changes?.length && <div className="code-proposal">
                 <div><span>{message.changes.length} file changes</span><small>{message.changes.map((change) => change.type === "delete" ? `− ${change.path}` : change.type === "move" ? `↳ ${change.path} → ${change.to}` : `+ ${change.path}`).join(" · ")}</small></div>
-                <button onClick={() => applyFileChanges(message.changes!)}>変更を適用</button>
+                {message.validationError ? <div className="lint-failed">✕ Lintで停止 · {message.validationError}</div> : message.autoApplied ? <div className="auto-applied">✓ Lint通過 · Auto-runで適用済み</div> : message.applied ? <div className="auto-applied">✓ Lint通過 · 適用済み</div> : <div className="lint-ready">Lintは適用時に実行されます</div>}
+                <button onClick={() => applyChatChanges(message.id, message.changes!)} disabled={Boolean(message.validationError)}>{message.applied ? "この変更を再適用" : "変更を適用"}</button>
               </div>}
             </article>)}
             {chatBusy && <div className="chat-thinking"><i /><span>{chatProgress || "Codexが考えています…"}</span><button onClick={() => chatAbortRef.current?.abort()}>停止</button></div>}
@@ -1155,27 +1462,6 @@ export default function Playground() {
           </div>
         </aside>
       </section>
-
-      <footer className="preset-dock">
-        <span>THREE.JS STARTERS</span>
-        <div className="preset-list">{PRESETS.map((preset, index) => <button key={preset.name} className={presetIndex === index ? "preset-active" : ""} onClick={() => choosePreset(index)}><i style={{ "--swatch": preset.accent } as React.CSSProperties} /><span>{preset.name}<small>Three.js module</small></span></button>)}</div>
-        <div className="hint"><kbd>⌘</kbd><kbd>↵</kbd><span>run</span><kbd>⌘</kbd><kbd>S</kbd><span>save</span></div>
-      </footer>
-
-      {libraryOpen && <div className="drawer-backdrop" onPointerDown={() => setLibraryOpen(false)}>
-        <aside className="library-drawer" onPointerDown={(event) => event.stopPropagation()} aria-label="Saved project library">
-          <div className="library-head"><div><span>LOCAL LIBRARY</span><strong>{library.length} saved sketches</strong></div><button onClick={() => setLibraryOpen(false)} aria-label="Close library">×</button></div>
-          <div className="library-actions"><button onClick={() => importRef.current?.click()}>Import</button><button onClick={exportLibrary} disabled={!library.length}>Backup JSON</button></div>
-          <div className="library-list">
-            {!library.length && <div className="empty-library"><i>＋</i><strong>No saved sketches yet</strong><span>Press Save to add the current JavaScript file.</span></div>}
-            {library.map((project) => <article key={project.id} className={project.id === activeProjectId ? "library-active" : ""}>
-              <button className="library-load" onClick={() => loadProject(project)}><i /><span><strong>{project.name}</strong><small>{project.files.length} files · {project.files.filter((file) => file.kind === "asset").length} assets</small></span><time>{new Date(project.updatedAt).toLocaleDateString()}</time></button>
-              <button className="library-delete" onClick={() => { void removeProject(project.id); setLibrary(library.filter((item) => item.id !== project.id)); }} aria-label={`Delete ${project.name}`}>×</button>
-            </article>)}
-          </div>
-          <div className="library-note"><span>DEVICE STORAGE</span><p>Projects stay in this browser. Export a JSON backup before clearing browser data.</p></div>
-        </aside>
-      </div>}
 
     </main>
   );
