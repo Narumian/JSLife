@@ -2,6 +2,16 @@ import AppKit
 import Foundation
 
 @main
+enum JSLifeCompanionApplication {
+    static func main() {
+        let application = NSApplication.shared
+        let delegate = AppDelegate()
+        application.setActivationPolicy(.regular)
+        application.delegate = delegate
+        application.run()
+    }
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var window: NSWindow!
     private var statusLabel: NSTextField!
@@ -34,12 +44,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        NSApp.setActivationPolicy(.regular)
         buildWindow()
         startBridge()
         refreshLoginStatus()
-        window.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        showWindow()
+    }
+
+    func applicationDidBecomeActive(_ notification: Notification) {
+        if window != nil, !window.isVisible {
+            showWindow()
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -49,6 +63,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             forEventClass: AEEventClass(kInternetEventClass),
             andEventID: AEEventID(kAEGetURL)
         )
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        showWindow()
+        return true
+    }
+
+    private func showWindow() {
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     private func buildWindow() {
