@@ -197,6 +197,18 @@ async function readWorkspace(workspaceId) {
   return { workspaceId, name, folderName: basename(root), files };
 }
 
+async function listWorkspaces() {
+  const workspaces = [];
+  for (const [workspaceId, record] of Object.entries(workspaceRegistry)) {
+    const root = typeof record === "string" ? record : record?.root;
+    if (typeof root !== "string") continue;
+    const name = typeof record === "object" && typeof record?.name === "string" ? record.name : basename(root);
+    const exists = await lstat(root).then(() => true, () => false);
+    workspaces.push({ workspaceId, name, folderName: basename(root), exists });
+  }
+  return { workspaces };
+}
+
 async function chooseWorkspace() {
   const script = 'POSIX path of (choose folder with prompt "JSLIFEで開くプロジェクトフォルダを選択")';
   const { stdout } = await execFileAsync("/usr/bin/osascript", ["-e", script]);
@@ -385,6 +397,15 @@ const server = createServer(async (request, response) => {
     } catch (error) {
       const cancelled = error?.code === 1 && /cancel/i.test(error.stderr || "");
       writeJson(response, cancelled ? 409 : 500, { error: cancelled ? "Folder selection cancelled" : error instanceof Error ? error.message : "Could not move project" }, origin);
+    }
+    return;
+  }
+
+  if (request.method === "GET" && request.url === "/workspaces") {
+    try {
+      writeJson(response, 200, await listWorkspaces(), origin);
+    } catch (error) {
+      writeJson(response, 500, { error: error instanceof Error ? error.message : "Could not list workspaces" }, origin);
     }
     return;
   }

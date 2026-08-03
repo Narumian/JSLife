@@ -16,6 +16,7 @@ type CodexResult = { message: string; action: "none" | "changes" | "need_image";
 type LocalWorkspaceFile = { path: string; kind: "text"; mimeType: string; content: string } | { path: string; kind: "asset"; mimeType: string; base64: string };
 type LocalWorkspaceResponse = { workspaceId: string; name: string; folderName?: string; files: LocalWorkspaceFile[] };
 type ProjectGroup = { id: string; name: string; root: "browser" | "local"; parentId: string | null };
+type KnownWorkspace = { workspaceId: string; name: string; folderName: string; exists: boolean };
 
 const STORAGE_LIBRARY = "jslife-library-v1";
 const STORAGE_DRAFT = "jslife-three-draft-v1";
@@ -25,6 +26,7 @@ const STORAGE_ACTIVE_CHAT = "jslife-active-chat-v2";
 const STORAGE_COMPANION_TOKEN = "jslife-companion-token-v1";
 const STORAGE_PREFERENCES = "jslife-preferences-v1";
 const STORAGE_PROJECT_GROUPS = "jslife-project-groups-v1";
+const STORAGE_LOCAL_WORKSPACE_GROUPS = "jslife-local-workspace-groups-v1";
 const CODEX_BRIDGE = "http://127.0.0.1:4317";
 const APP_MODE = import.meta.env.VITE_JSLIFE_MODE || "local";
 const IS_STATIC_SHOWCASE = APP_MODE === "pages";
@@ -46,6 +48,14 @@ const initialProjectGroups = (): ProjectGroup[] => {
     const parsed = JSON.parse(localStorage.getItem(STORAGE_PROJECT_GROUPS) || "[]") as ProjectGroup[];
     return Array.isArray(parsed) ? parsed.filter((group) => group && typeof group.id === "string" && typeof group.name === "string" && (group.root === "browser" || group.root === "local")) : [];
   } catch { return []; }
+};
+
+const initialLocalWorkspaceGroups = (): Record<string, string> => {
+  if (typeof window === "undefined") return {};
+  try {
+    const parsed = JSON.parse(localStorage.getItem(STORAGE_LOCAL_WORKSPACE_GROUPS) || "{}") as Record<string, string>;
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch { return {}; }
 };
 
 const localWorkspaceFiles = (workspace: LocalWorkspaceResponse): ProjectFile[] => workspace.files.map((file) => file.kind === "text"
@@ -359,6 +369,9 @@ export default function Playground() {
   const [previewCollapsedFolders, setPreviewCollapsedFolders] = useState<Set<string>>(new Set());
   const [collapsedProjectGroups, setCollapsedProjectGroups] = useState<Set<string>>(new Set());
   const [projectGroups, setProjectGroups] = useState<ProjectGroup[]>(initialProjectGroups);
+  const [knownWorkspaces, setKnownWorkspaces] = useState<KnownWorkspace[]>([]);
+  const [localWorkspaceGroups, setLocalWorkspaceGroups] = useState<Record<string, string>>(initialLocalWorkspaceGroups);
+  const draggedProjectRef = useRef<{ root: "browser"; id: string } | { root: "local"; workspaceId: string } | null>(null);
   const [projectTreeMenu, setProjectTreeMenu] = useState<{ x: number; y: number; root: "browser" | "local"; parentId: string | null } | null>(null);
   const [codeSearchOpen, setCodeSearchOpen] = useState(false);
   const [codeSearchQuery, setCodeSearchQuery] = useState("");
@@ -430,12 +443,17 @@ export default function Playground() {
     [activeProjectId, library, workspaceId],
   );
   const showWorkspaceInExplorer = Boolean(workspaceId || selectedProjectKey === "workspace");
+  const visibleKnownWorkspaces = useMemo(
+    () => knownWorkspaces.filter((entry) => entry.workspaceId !== workspaceId),
+    [knownWorkspaces, workspaceId],
+  );
   const projectSelectionKeys = useMemo(() => [
     ...(showWorkspaceInExplorer ? ["workspace"] : []),
     ...visibleLibrary.map((project) => `saved:${project.id}`),
+    ...visibleKnownWorkspaces.map((entry) => `known:${entry.workspaceId}`),
     "starter:blank",
     ...PRESETS.map((_preset, index) => `starter:${index}`),
-  ], [showWorkspaceInExplorer, visibleLibrary]);
+  ], [showWorkspaceInExplorer, visibleLibrary, visibleKnownWorkspaces]);
   const selectedProject = useMemo(() => {
     if (selectedProjectKey.startsWith("saved:")) {
       const project = library.find((candidate) => `saved:${candidate.id}` === selectedProjectKey);
@@ -464,6 +482,7 @@ export default function Playground() {
   useEffect(() => { autoRunRef.current = autoRun; }, [autoRun]);
   useEffect(() => { chatConversationsRef.current = chatConversations; }, [chatConversations]);
   useEffect(() => { localStorage.setItem(STORAGE_PROJECT_GROUPS, JSON.stringify(projectGroups)); }, [projectGroups]);
+  useEffect(() => { localStorage.setItem(STORAGE_LOCAL_WORKSPACE_GROUPS, JSON.stringify(localWorkspaceGroups)); }, [localWorkspaceGroups]);
   useEffect(() => {
     const url = new URL(window.location.href);
     const pairedToken = url.searchParams.get("companion_token");
@@ -830,6 +849,23 @@ export default function Playground() {
     return () => window.clearTimeout(timer);
   }, [checkCodex]);
 
+  const refreshKnownWorkspaces = useCallback(async () => {
+    if (IS_STATIC_SHOWCASE && chatOnline !== true) {
+      setKnownWorkspaces([]);
+      return;
+    }
+    try {
+      const response = await fetch(`${CODEX_BRIDGE}/workspaces`, {
+        headers: companionToken ? { "X-JSLIFE-Companion-Token": companionToken } : undefined,
+      });
+      if (!response.ok) return;
+      const body = await response.json() as { workspaces: KnownWorkspace[] };
+      setKnownWorkspaces(Array.isArray(body.workspaces) ? body.workspaces : []);
+    } catch { /* keep the previous list when the bridge is unreachable */ }
+  }, [chatOnline, companionToken]);
+
+  useEffect(() => { void refreshKnownWorkspaces(); }, [refreshKnownWorkspaces]);
+
   useEffect(() => {
     const timer = window.setTimeout(() => chatEndRef.current?.scrollIntoView({ behavior: "smooth" }), 0);
     return () => window.clearTimeout(timer);
@@ -1087,6 +1123,29 @@ export default function Playground() {
     });
   };
 
+  const hydrateLocalWorkspace = (body: LocalWorkspaceResponse, selectionKey: string) => {
+    const nextFiles = localWorkspaceFiles(body);
+    const entryFile = nextFiles.find((file) => file.path === "main.js" && file.kind === "text");
+    if (!entryFile || entryFile.kind !== "text") throw new Error("Selected folder needs a text main.js file");
+    saveCurrentConversation();
+    workspaceFilesRef.current = nextFiles;
+    hydratedWorkspaceRef.current = body.workspaceId;
+    setWorkspaceId(body.workspaceId);
+    setWorkspaceName(body.folderName ?? body.name);
+    setProjectName(body.name);
+    setFiles(nextFiles);
+    setActivePath("main.js");
+    setOpenPaths(["main.js"]);
+    setCode(entryFile.content);
+    setActiveProjectId(`local:${body.workspaceId}`);
+    setSelectedProjectKey(selectionKey);
+    setUndoFiles(null);
+    setSaved(true);
+    setSidebarMode("files");
+    runSource(nextFiles);
+    setError(null);
+  };
+
   const openLocalWorkspace = async () => {
     if (IS_STATIC_SHOWCASE && chatOnline !== true) {
       setChatOpen(true);
@@ -1102,28 +1161,23 @@ export default function Playground() {
         if (response.status === 409) return;
         throw new Error(body.error || `Companion returned ${response.status}`);
       }
-      const nextFiles = localWorkspaceFiles(body);
-      const entryFile = nextFiles.find((file) => file.path === "main.js" && file.kind === "text");
-      if (!entryFile || entryFile.kind !== "text") throw new Error("Selected folder needs a text main.js file");
-      saveCurrentConversation();
-      workspaceFilesRef.current = nextFiles;
-      hydratedWorkspaceRef.current = body.workspaceId;
-      setWorkspaceId(body.workspaceId);
-      setWorkspaceName(body.folderName ?? body.name);
-      setProjectName(body.name);
-      setFiles(nextFiles);
-      setActivePath("main.js");
-      setOpenPaths(["main.js"]);
-      setCode(entryFile.content);
-      setActiveProjectId(`local:${body.workspaceId}`);
-      setSelectedProjectKey("workspace");
-      setUndoFiles(null);
-      setSaved(true);
-      setSidebarMode("files");
-      runSource(nextFiles);
-      setError(null);
+      hydrateLocalWorkspace(body, "workspace");
+      void refreshKnownWorkspaces();
     } catch (caught) {
       setError(`Could not open local folder: ${caught instanceof Error ? caught.message : "Companion is unavailable"}`);
+    }
+  };
+
+  const loadKnownWorkspace = async (knownWorkspaceId: string) => {
+    try {
+      const response = await fetch(`${CODEX_BRIDGE}/workspaces/${knownWorkspaceId}`, {
+        headers: companionToken ? { "X-JSLIFE-Companion-Token": companionToken } : undefined,
+      });
+      const body = await response.json() as LocalWorkspaceResponse & { error?: string };
+      if (!response.ok) throw new Error(body.error || `Desktop service returned ${response.status}`);
+      hydrateLocalWorkspace(body, `known:${knownWorkspaceId}`);
+    } catch (caught) {
+      setError(`Could not open local project: ${caught instanceof Error ? caught.message : "Desktop service is unavailable"}`);
     }
   };
 
@@ -1185,6 +1239,7 @@ export default function Playground() {
       setSidebarMode("files");
       runSource(nextFiles);
       setError(null);
+      void refreshKnownWorkspaces();
     } catch (caught) {
       setError(`Could not move project: ${caught instanceof Error ? caught.message : "Desktop service is unavailable"}`);
     }
@@ -1231,6 +1286,10 @@ export default function Playground() {
     if (key.startsWith("saved:")) {
       const project = library.find((candidate) => `saved:${candidate.id}` === key);
       if (project) loadProject(project, true);
+      return;
+    }
+    if (key.startsWith("known:")) {
+      void loadKnownWorkspace(key.slice("known:".length));
       return;
     }
     if (key === "starter:blank") {
@@ -1303,20 +1362,119 @@ export default function Playground() {
     });
   };
 
+  const createProjectInGroup = async (root: "browser" | "local", groupId: string | null) => {
+    if (root === "browser") {
+      const record: ProjectRecord = {
+        id: crypto.randomUUID(),
+        name: "Untitled Project",
+        entry: "main.js",
+        runtimeId: "three",
+        files: [mainFile(BLANK_PROJECT)],
+        updatedAt: new Date().toISOString(),
+        groupId,
+      };
+      await putProject(record);
+      setLibrary((current) => [record, ...current]);
+      loadProject(record, true);
+      return;
+    }
+    if (IS_STATIC_SHOWCASE && chatOnline !== true) {
+      setChatOpen(true);
+      return;
+    }
+    try {
+      const response = await fetch(`${CODEX_BRIDGE}/workspaces/move`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(companionToken ? { "X-JSLIFE-Companion-Token": companionToken } : {}),
+        },
+        body: JSON.stringify({ projectName: "Untitled Project", files: await serializeWorkspaceFiles([mainFile(BLANK_PROJECT)]) }),
+      });
+      const body = await response.json() as LocalWorkspaceResponse & { error?: string };
+      if (!response.ok) throw new Error(body.error || `Desktop service returned ${response.status}`);
+      if (groupId) setLocalWorkspaceGroups((current) => ({ ...current, [body.workspaceId]: groupId }));
+      hydrateLocalWorkspace(body, `known:${body.workspaceId}`);
+      void refreshKnownWorkspaces();
+    } catch (caught) {
+      setError(`Could not create local project: ${caught instanceof Error ? caught.message : "Desktop service is unavailable"}`);
+    }
+  };
+
+  const handleNewProjectClick = () => {
+    if (!projectTreeMenu) return;
+    const { root, parentId } = projectTreeMenu;
+    setProjectTreeMenu(null);
+    void createProjectInGroup(root, parentId);
+  };
+
+  const assignToGroup = (root: "browser" | "local", entryId: string, groupId: string | null) => {
+    if (root === "browser") {
+      const project = library.find((candidate) => candidate.id === entryId);
+      if (!project || (project.groupId ?? null) === groupId) return;
+      const updated = { ...project, groupId };
+      setLibrary((current) => current.map((candidate) => candidate.id === entryId ? updated : candidate));
+      void putProject(updated);
+      return;
+    }
+    setLocalWorkspaceGroups((current) => {
+      if ((current[entryId] ?? null) === groupId) return current;
+      const next = { ...current };
+      if (groupId) next[entryId] = groupId; else delete next[entryId];
+      return next;
+    });
+  };
+
+  const handleProjectDragStart = (root: "browser" | "local", entryId: string) => (event: React.DragEvent) => {
+    draggedProjectRef.current = root === "browser" ? { root, id: entryId } : { root, workspaceId: entryId };
+    event.dataTransfer.effectAllowed = "move";
+  };
+
+  const handleGroupDragOver = (root: "browser" | "local") => (event: React.DragEvent) => {
+    if (draggedProjectRef.current?.root === root) event.preventDefault();
+  };
+
+  const handleGroupDrop = (root: "browser" | "local", groupId: string | null) => (event: React.DragEvent) => {
+    event.preventDefault();
+    const dragged = draggedProjectRef.current;
+    draggedProjectRef.current = null;
+    if (!dragged || dragged.root !== root) return;
+    assignToGroup(root, dragged.root === "browser" ? dragged.id : dragged.workspaceId, groupId);
+  };
+
   const renderProjectGroupFolders = (root: "browser" | "local", parentId: string | null, depth = 1): React.ReactNode => projectGroups
     .filter((group) => group.root === root && group.parentId === parentId)
     .map((group) => {
       const collapseKey = `group:${group.id}`;
       const collapsed = collapsedProjectGroups.has(collapseKey);
-      const childCount = projectGroups.filter((candidate) => candidate.parentId === group.id).length;
+      const nestedGroupCount = projectGroups.filter((candidate) => candidate.parentId === group.id).length;
+      const groupProjects = root === "browser" ? visibleLibrary.filter((project) => project.groupId === group.id) : [];
+      const groupWorkspaces = root === "local" ? visibleKnownWorkspaces.filter((entry) => localWorkspaceGroups[entry.workspaceId] === group.id) : [];
+      const itemCount = nestedGroupCount + groupProjects.length + groupWorkspaces.length;
       return <div className="project-tree-folder-node" key={group.id}>
         <button
           className="project-tree-folder"
           style={{ paddingLeft: 9 + depth * 13 }}
           onClick={() => toggleProjectGroup(collapseKey)}
           onContextMenu={(event) => openProjectGroupMenu(event, root, group.id)}
-        ><span>{collapsed ? "▸" : "▾"}</span><i>▱</i><strong>{group.name}</strong>{childCount > 0 && <small>{childCount}</small>}</button>
-        {!collapsed && renderProjectGroupFolders(root, group.id, depth + 1)}
+          onDragOver={handleGroupDragOver(root)}
+          onDrop={handleGroupDrop(root, group.id)}
+        ><span>{collapsed ? "▸" : "▾"}</span><i>▱</i><strong>{group.name}</strong>{itemCount > 0 && <small>{itemCount}</small>}</button>
+        {!collapsed && <>
+          {renderProjectGroupFolders(root, group.id, depth + 1)}
+          {groupProjects.map((project) => { const key = `saved:${project.id}`; return renderExplorerProject(key, project.name, `${project.files.length} files · ${formatProjectTimestamp(project.updatedAt)}`, {
+            loaded: project.id === activeProjectId,
+            package: true,
+            draggable: true,
+            onDragStart: handleProjectDragStart("browser", project.id),
+            onDelete: () => { void removeProject(project.id); setLibrary((current) => current.filter((item) => item.id !== project.id)); if (selectedProjectKey === key) selectExplorerProject("workspace"); },
+          }); })}
+          {groupWorkspaces.map((entry) => renderExplorerProject(`known:${entry.workspaceId}`, entry.name, entry.exists ? entry.folderName : "Folder not found", {
+            package: true,
+            draggable: true,
+            onDragStart: handleProjectDragStart("local", entry.workspaceId),
+          }))}
+        </>}
       </div>;
     });
 
@@ -1324,9 +1482,14 @@ export default function Playground() {
     key: string,
     name: string,
     detail: string,
-    options?: { accent?: string; blank?: boolean; loaded?: boolean; package?: boolean; onDelete?: () => void },
+    options?: { accent?: string; blank?: boolean; loaded?: boolean; package?: boolean; onDelete?: () => void; draggable?: boolean; onDragStart?: (event: React.DragEvent) => void },
   ) => {
-    return <div className={`project-explorer-entry${selectedProjectKey === key ? " project-explorer-selected" : ""}${options?.loaded ? " project-explorer-loaded" : ""}`} key={key}>
+    return <div
+      className={`project-explorer-entry${selectedProjectKey === key ? " project-explorer-selected" : ""}${options?.loaded ? " project-explorer-loaded" : ""}`}
+      key={key}
+      draggable={options?.draggable}
+      onDragStart={options?.onDragStart}
+    >
       <div className="project-explorer-project">
         <button id={`project-${key.replace(/[^a-z0-9_-]/gi, "-")}`} role="option" aria-selected={selectedProjectKey === key} className="project-explorer-select" onClick={() => selectExplorerProject(key)} onDoubleClick={() => activateProjectSelection(key)}>
           <i className={options?.blank ? "project-explorer-blank" : options?.package ? "project-explorer-package" : ""} style={{ "--swatch": options?.accent ?? "var(--purple)" } as React.CSSProperties}>{options?.blank ? "＋" : options?.package ? "J" : "▱"}</i>
@@ -1786,7 +1949,7 @@ export default function Playground() {
 
       <section className="workspace">
         <aside className="rail" aria-label="Studio tools">
-          <button className={editorOpen && sidebarMode === "library" ? "rail-active" : ""} aria-label="Library" aria-pressed={editorOpen && sidebarMode === "library"} onClick={openProjectBrowser}><Icon>▤</Icon></button>
+          <button className={editorOpen && sidebarMode === "library" ? "rail-active" : ""} aria-label="Library" aria-pressed={editorOpen && sidebarMode === "library"} onClick={() => { if (editorOpen && sidebarMode === "library") toggleEditor(); else openProjectBrowser(); }}><Icon>▤</Icon></button>
           <button className={editorOpen && sidebarMode === "files" ? "rail-active" : ""} aria-label="Project files" aria-pressed={editorOpen && sidebarMode === "files"} onClick={() => { if (editorOpen && sidebarMode === "files") toggleEditor(); else { setSidebarMode("files"); setEditorOpen(true); } }} title="Project files"><Icon>⌘</Icon></button>
           <button aria-label="Import" onClick={() => importRef.current?.click()}><Icon>⇣</Icon></button>
           <button aria-label="Add assets" onClick={() => assetRef.current?.click()} title="Add assets"><Icon>◇</Icon></button>
@@ -1831,23 +1994,31 @@ export default function Playground() {
               </> : <>
                 <div className="project-browser-scroll project-explorer" role="listbox" aria-label="Projects" aria-activedescendant={`project-${selectedProjectKey.replace(/[^a-z0-9_-]/gi, "-")}`} tabIndex={0} onKeyDown={handleProjectBrowserKeyDown}>
                   <div className="project-tree-root-node">
-                    <button className="project-tree-root" onClick={() => toggleProjectGroup("browser")} onContextMenu={(event) => openProjectGroupMenu(event, "browser", null)}><span>{collapsedProjectGroups.has("browser") ? "▸" : "▾"}</span><i>▱</i><strong>Browser</strong><small>{visibleLibrary.length + (!workspaceId && showWorkspaceInExplorer ? 1 : 0)}</small></button>
+                    <button className="project-tree-root" onClick={() => toggleProjectGroup("browser")} onContextMenu={(event) => openProjectGroupMenu(event, "browser", null)} onDragOver={handleGroupDragOver("browser")} onDrop={handleGroupDrop("browser", null)}><span>{collapsedProjectGroups.has("browser") ? "▸" : "▾"}</span><i>▱</i><strong>Browser</strong><small>{visibleLibrary.length + (!workspaceId && showWorkspaceInExplorer ? 1 : 0)}</small></button>
                     {!collapsedProjectGroups.has("browser") && <div className="project-tree-children">
                       {renderProjectGroupFolders("browser", null)}
                       {!workspaceId && showWorkspaceInExplorer && renderExplorerProject("workspace", projectName, `${projectFiles.length} files · ${saved ? "saved" : "unsaved"}`, { loaded: true, package: saved })}
-                      {!visibleLibrary.length && !(!workspaceId && showWorkspaceInExplorer) && <p className="project-browser-empty">Save a project to add it here.</p>}
-                      {visibleLibrary.map((project) => { const key = `saved:${project.id}`; return renderExplorerProject(key, project.name, `${project.files.length} files · ${formatProjectTimestamp(project.updatedAt)}`, {
+                      {!visibleLibrary.filter((project) => !project.groupId).length && !(!workspaceId && showWorkspaceInExplorer) && <p className="project-browser-empty">Save a project to add it here.</p>}
+                      {visibleLibrary.filter((project) => !project.groupId).map((project) => { const key = `saved:${project.id}`; return renderExplorerProject(key, project.name, `${project.files.length} files · ${formatProjectTimestamp(project.updatedAt)}`, {
                         loaded: project.id === activeProjectId,
                         package: true,
+                        draggable: true,
+                        onDragStart: handleProjectDragStart("browser", project.id),
                         onDelete: () => { void removeProject(project.id); setLibrary((current) => current.filter((item) => item.id !== project.id)); if (selectedProjectKey === key) selectExplorerProject("workspace"); },
                       }); })}
                     </div>}
                   </div>
                   <div className="project-tree-root-node">
-                    <button className="project-tree-root" onClick={() => toggleProjectGroup("local")} onContextMenu={(event) => openProjectGroupMenu(event, "local", null)}><span>{collapsedProjectGroups.has("local") ? "▸" : "▾"}</span><i>▱</i><strong>Local</strong><small>{workspaceId ? 1 : 0}</small></button>
+                    <button className="project-tree-root" onClick={() => toggleProjectGroup("local")} onContextMenu={(event) => openProjectGroupMenu(event, "local", null)} onDragOver={handleGroupDragOver("local")} onDrop={handleGroupDrop("local", null)}><span>{collapsedProjectGroups.has("local") ? "▸" : "▾"}</span><i>▱</i><strong>Local</strong><small>{(workspaceId ? 1 : 0) + visibleKnownWorkspaces.length}</small></button>
                     {!collapsedProjectGroups.has("local") && <div className="project-tree-children">
                       {renderProjectGroupFolders("local", null)}
-                      {workspaceId ? renderExplorerProject("workspace", projectName, `${projectFiles.length} files · ${workspaceName}`, { loaded: true }) : <p className="project-browser-empty">No local project is open.</p>}
+                      {workspaceId && renderExplorerProject("workspace", projectName, `${projectFiles.length} files · ${workspaceName}`, { loaded: true })}
+                      {!workspaceId && !visibleKnownWorkspaces.filter((entry) => !localWorkspaceGroups[entry.workspaceId]).length && <p className="project-browser-empty">No local project is open.</p>}
+                      {visibleKnownWorkspaces.filter((entry) => !localWorkspaceGroups[entry.workspaceId]).map((entry) => renderExplorerProject(`known:${entry.workspaceId}`, entry.name, entry.exists ? entry.folderName : "Folder not found", {
+                        package: true,
+                        draggable: true,
+                        onDragStart: handleProjectDragStart("local", entry.workspaceId),
+                      }))}
                     </div>}
                   </div>
                   <div className="project-tree-root-node">
@@ -2061,6 +2232,7 @@ export default function Playground() {
           : <button onClick={() => { setFileBrowserMenu(null); moveToLocalWorkspace(); }}>Move to Local Files</button>}
       </div>}
       {projectTreeMenu && <div className="file-browser-context-menu project-tree-context-menu" style={{ left: projectTreeMenu.x, top: projectTreeMenu.y }} onPointerDown={(event) => event.stopPropagation()}>
+        <button onClick={handleNewProjectClick}>New Project</button>
         <button onClick={addProjectGroup}>Add Group</button>
       </div>}
 

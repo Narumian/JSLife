@@ -21,6 +21,7 @@ export type ProjectRecord = {
   runtimeId: "three";
   files: ProjectFile[];
   updatedAt: string;
+  groupId?: string | null;
 };
 
 export type DraftRecord = {

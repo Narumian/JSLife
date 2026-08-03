@@ -63,6 +63,10 @@ test("ships storage, packaging, chat, and all three launch routes", async () => 
   assert.match(bridge, /moveToWorkspace/);
   assert.match(bridge, /Application Support", "JSLIFE", "Projects/);
   assert.match(bridge, /\/reveal/);
+  assert.match(bridge, /listWorkspaces/);
+  assert.match(playground, /knownWorkspaces/);
+  assert.match(playground, /localWorkspaceGroups/);
+  assert.match(playground, /handleGroupDrop/);
   assert.match(packageJson, /"fflate"/);
   assert.match(packageJson, /VITE_JSLIFE_MODE=pages/);
   assert.match(packageJson, /VITE_JSLIFE_MODE=desktop/);
