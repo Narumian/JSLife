@@ -4,7 +4,15 @@ import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
 import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
 import type { ProjectFile } from "./project-store";
 
-export type PointerState = { x: number; y: number; px: number; py: number; down: boolean };
+export type PointerState = {
+  x: number;
+  y: number;
+  px: number;
+  py: number;
+  down: boolean;
+  pressure: number;
+  kind: "mouse" | "touch" | "pen";
+};
 export type FrameArgs = { time: number; delta: number; frame: number; pointer: PointerState };
 export type ResizeArgs = { width: number; height: number; pixelRatio: number };
 export type GraphicsRuntime = {

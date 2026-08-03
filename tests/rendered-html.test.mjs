@@ -53,6 +53,8 @@ test("ships storage, packaging, chat, and all three launch routes", async () => 
   assert.match(playground, />Browser</);
   assert.match(playground, />Local</);
   assert.match(playground, />Starters</);
+  assert.match(playground, /setPointerCapture/);
+  assert.match(playground, /activePointer/);
   assert.match(playground, /Saved to folder/);
   assert.match(bridge, /"write", "delete", "move"/);
   assert.match(bridge, /safeWorkspacePath/);

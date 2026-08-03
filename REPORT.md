@@ -26,6 +26,8 @@ export function dispose() {
 }
 ```
 
+プレビューはhover追従ではなくXYパッドとして扱う。タッチまたは押下で操作を開始し、ドラッグ中だけ`pointer.x/y`を更新、離した後は最後の値を保持する。同時入力ではtouchをmouseより優先する。`pointer.down`をゲート、`pointer.pressure`を筆圧、`pointer.kind`を`touch` / `pen` / `mouse`の判定に使用できる。
+
 ## 作成手順
 
 1. Next.js / React / TypeScript を使い、ブラウザ上で動作する制作画面を構築。

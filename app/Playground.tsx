@@ -392,7 +392,8 @@ export default function Playground() {
   const assetRef = useRef<HTMLInputElement>(null);
   const editorRef = useRef<HTMLTextAreaElement>(null);
   const codeSearchRef = useRef<HTMLInputElement>(null);
-  const pointer = useRef<PointerState>({ x: 0, y: 0, px: 0, py: 0, down: false });
+  const pointer = useRef<PointerState>({ x: 0, y: 0, px: 0, py: 0, down: false, pressure: 0, kind: "touch" });
+  const activePointer = useRef<{ id: number; kind: PointerState["kind"] } | null>(null);
   const startTime = useRef(0);
   const pausedAt = useRef(0);
   const lastFrame = useRef(0);
@@ -1378,12 +1379,53 @@ export default function Playground() {
     }
   };
 
+  const pointerKind = (event: React.PointerEvent<HTMLDivElement>): PointerState["kind"] => event.pointerType === "touch" || event.pointerType === "pen" ? event.pointerType : "mouse";
+
   const updatePointer = (event: React.PointerEvent<HTMLDivElement>) => {
     const rect = event.currentTarget.getBoundingClientRect();
     pointer.current.px = event.clientX - rect.left;
     pointer.current.py = event.clientY - rect.top;
     pointer.current.x = (pointer.current.px / rect.width) * 2 - 1;
     pointer.current.y = -(pointer.current.py / rect.height) * 2 + 1;
+    pointer.current.pressure = event.pressure;
+    pointer.current.kind = pointerKind(event);
+  };
+
+  const beginPadInteraction = (event: React.PointerEvent<HTMLDivElement>) => {
+    const kind = pointerKind(event);
+    const active = activePointer.current;
+    if (active && active.id !== event.pointerId) {
+      if (active.kind === "touch" || kind !== "touch") return;
+      if (event.currentTarget.hasPointerCapture(active.id)) event.currentTarget.releasePointerCapture(active.id);
+    }
+    event.preventDefault();
+    activePointer.current = { id: event.pointerId, kind };
+    event.currentTarget.setPointerCapture(event.pointerId);
+    pointer.current.down = true;
+    updatePointer(event);
+  };
+
+  const movePadInteraction = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (!pointer.current.down || activePointer.current?.id !== event.pointerId) return;
+    event.preventDefault();
+    updatePointer(event);
+  };
+
+  const endPadInteraction = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (activePointer.current?.id !== event.pointerId) return;
+    event.preventDefault();
+    updatePointer(event);
+    pointer.current.down = false;
+    pointer.current.pressure = 0;
+    activePointer.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+  };
+
+  const losePadInteraction = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (activePointer.current?.id !== event.pointerId) return;
+    pointer.current.down = false;
+    pointer.current.pressure = 0;
+    activePointer.current = null;
   };
 
   const capturePreview = () => {
@@ -1839,9 +1881,11 @@ export default function Playground() {
             className="stage"
             ref={stageRef}
             style={{ "--preset-accent": PRESETS[presetIndex].accent } as React.CSSProperties}
-            onPointerMove={updatePointer}
-            onPointerDown={(event) => { pointer.current.down = true; updatePointer(event); }}
-            onPointerUp={() => { pointer.current.down = false; }}
+            onPointerMove={movePadInteraction}
+            onPointerDown={beginPadInteraction}
+            onPointerUp={endPadInteraction}
+            onPointerCancel={endPadInteraction}
+            onLostPointerCapture={losePadInteraction}
           >
             <div className="render-mount" ref={mountRef} />
             <div className="stage-label"><span>WEBGL RENDERER</span><small>main.js · {projectFiles.length} project files</small></div>
