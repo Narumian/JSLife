@@ -386,6 +386,7 @@ export default function Playground() {
   const [codexThreadId, setCodexThreadId] = useState<string | null>(null);
   const [undoFiles, setUndoFiles] = useState<ProjectFile[] | null>(null);
   const [fileBrowserMenu, setFileBrowserMenu] = useState<{ x: number; y: number } | null>(null);
+  const [moveConfirmOpen, setMoveConfirmOpen] = useState(false);
   const mountRef = useRef<HTMLDivElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
   const runtimeRef = useRef<GraphicsRuntime | null>(null);
@@ -1095,10 +1096,13 @@ export default function Playground() {
     }
   };
 
-  const moveToLocalWorkspace = async () => {
+  const moveToLocalWorkspace = () => {
     if ((IS_STATIC_SHOWCASE && chatOnline !== true) || workspaceId) return;
-    const confirmed = window.confirm("Move this project to ~/Library/Application Support/JSLIFE/Projects/? The browser-saved version will be kept as a backup.");
-    if (!confirmed) return;
+    setMoveConfirmOpen(true);
+  };
+
+  const performMoveToLocalWorkspace = async () => {
+    setMoveConfirmOpen(false);
     try {
       const serialized = await serializeWorkspaceFiles(projectFiles);
       const response = await fetch(`${CODEX_BRIDGE}/workspaces/move`, {
@@ -1756,7 +1760,7 @@ export default function Playground() {
         </aside>
 
         <section className="editor-panel" aria-label="JavaScript module editor">
-          <div className="panel-heading"><span>{sidebarMode === "library" ? "PROJECTS" : "EDITOR"}</span><div>{sidebarMode === "library" ? <>{(!IS_STATIC_SHOWCASE || chatOnline === true) && <button className="asset-add" onClick={() => void openLocalWorkspace()}>Open folder</button>}{(!IS_STATIC_SHOWCASE || chatOnline === true) && !workspaceId && <button className="asset-add" onClick={() => void moveToLocalWorkspace()}>Move to Local Files</button>}<button className="asset-add" onClick={() => createBlankProject()}>＋ new</button><button className="asset-add" onClick={() => importRef.current?.click()}>Import</button></> : <><button className="asset-add" onClick={addTextFile} title="New text file">＋ file</button><button className="asset-add" onClick={() => assetRef.current?.click()} title="Add assets">＋ asset</button><button className="editor-code-search" onClick={openCodeSearch} title="Find in code (⌘F)" aria-label="Find in code">⌕ <kbd>⌘F</kbd></button></>}</div></div>
+          <div className="panel-heading"><span>{sidebarMode === "library" ? "PROJECTS" : "EDITOR"}</span><div>{sidebarMode === "library" ? <>{(!IS_STATIC_SHOWCASE || chatOnline === true) && <button className="asset-add" onClick={() => void openLocalWorkspace()}>Open folder</button>}{(!IS_STATIC_SHOWCASE || chatOnline === true) && !workspaceId && <button className="asset-add" onClick={() => moveToLocalWorkspace()}>Move to Local Files</button>}<button className="asset-add" onClick={() => createBlankProject()}>＋ new</button><button className="asset-add" onClick={() => importRef.current?.click()}>Import</button></> : <><button className="asset-add" onClick={addTextFile} title="New text file">＋ file</button><button className="asset-add" onClick={() => assetRef.current?.click()} title="Add assets">＋ asset</button><button className="editor-code-search" onClick={openCodeSearch} title="Find in code (⌘F)" aria-label="Find in code">⌕ <kbd>⌘F</kbd></button></>}</div></div>
           <div className="editor-body">
             <aside className="file-browser" aria-label={sidebarMode === "library" ? "Project browser" : "Project file browser"} onContextMenu={(event) => {
               if ((IS_STATIC_SHOWCASE && chatOnline !== true) || sidebarMode !== "files") return;
@@ -1819,7 +1823,7 @@ export default function Playground() {
                     </div>}
                   </div>
                 </div>
-                <div className="project-browser-footer">{(!IS_STATIC_SHOWCASE || chatOnline === true) && <button onClick={() => void openLocalWorkspace()}>Open local folder</button>}{(!IS_STATIC_SHOWCASE || chatOnline === true) && !workspaceId && <button onClick={() => void moveToLocalWorkspace()}>Move to Local Files</button>}<button onClick={exportLibrary} disabled={!library.length}>Backup JSON</button></div>
+                <div className="project-browser-footer">{(!IS_STATIC_SHOWCASE || chatOnline === true) && <button onClick={() => void openLocalWorkspace()}>Open local folder</button>}{(!IS_STATIC_SHOWCASE || chatOnline === true) && !workspaceId && <button onClick={() => moveToLocalWorkspace()}>Move to Local Files</button>}<button onClick={exportLibrary} disabled={!library.length}>Backup JSON</button></div>
               </>}
             </aside>
             <div className="code-workspace">
@@ -2019,10 +2023,21 @@ export default function Playground() {
       {fileBrowserMenu && <div className="file-browser-context-menu" style={{ left: fileBrowserMenu.x, top: fileBrowserMenu.y }} onPointerDown={(event) => event.stopPropagation()}>
         {workspaceId
           ? <button onClick={() => void revealLocalWorkspace()}>Open Project Folder in Finder</button>
-          : <button onClick={() => { setFileBrowserMenu(null); void moveToLocalWorkspace(); }}>Move to Local Files</button>}
+          : <button onClick={() => { setFileBrowserMenu(null); moveToLocalWorkspace(); }}>Move to Local Files</button>}
       </div>}
       {projectTreeMenu && <div className="file-browser-context-menu project-tree-context-menu" style={{ left: projectTreeMenu.x, top: projectTreeMenu.y }} onPointerDown={(event) => event.stopPropagation()}>
         <button onClick={addProjectGroup}>Add Group</button>
+      </div>}
+
+      {moveConfirmOpen && <div className="confirm-overlay" onClick={() => setMoveConfirmOpen(false)}>
+        <div className="confirm-modal" onClick={(event) => event.stopPropagation()}>
+          <strong>Move to Local Files?</strong>
+          <p>This project will be written to <code>~/Library/Application Support/JSLIFE/Projects/</code>. The browser-saved version will be kept as a backup.</p>
+          <div className="confirm-modal-actions">
+            <button className="confirm-cancel" onClick={() => setMoveConfirmOpen(false)}>Cancel</button>
+            <button className="confirm-primary" onClick={() => void performMoveToLocalWorkspace()}>Move</button>
+          </div>
+        </div>
       </div>}
 
     </main>
