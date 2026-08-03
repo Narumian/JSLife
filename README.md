@@ -111,7 +111,6 @@ the latest Release download or cloning the repository and running
 ## Validation
 
 ```bash
-npm run lint
 npm run build
 npm run build:pages
 npm run build:desktop

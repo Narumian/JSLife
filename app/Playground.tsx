@@ -663,7 +663,7 @@ export default function Playground() {
       runSource(sourceToRestore);
     })();
     return () => { cancelled = true; };
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     if (!draftReadyRef.current) return;
@@ -1601,7 +1601,7 @@ export default function Playground() {
         setChatProgress(result.message || "プレビューを確認しています…");
         const followupImage = capturePreview();
         const followup = await postChatTurn(
-          { message: "[system] The requested canvas screenshot is attached below.", previewImage: followupImage, threadId },
+          { message: `[system] The requested canvas screenshot is attached below. Continue answering the original request: ${requestText}`, previewImage: followupImage, threadId },
           controller.signal,
           markConnected,
         );

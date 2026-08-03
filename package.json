@@ -16,7 +16,6 @@
     "build:companion": "npm run build:app",
     "start": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext start",
     "test": "npm run build && node --test tests/*.test.mjs",
-    "lint": "eslint . --ignore-pattern dist --ignore-pattern dist-pages --ignore-pattern dist-desktop --ignore-pattern build-app --ignore-pattern .companion-cache --ignore-pattern .next",
     "db:generate": "drizzle-kit generate"
   },
   "dependencies": {
@@ -38,8 +37,6 @@
     "@vitejs/plugin-react": "6.0.2",
     "@vitejs/plugin-rsc": "0.5.26",
     "drizzle-kit": "0.31.10",
-    "eslint": "9.39.4",
-    "eslint-config-next": "16.2.6",
     "react-server-dom-webpack": "19.2.6",
     "tailwindcss": "4.2.1",
     "typescript": "5.9.3",
