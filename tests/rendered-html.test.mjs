@@ -66,8 +66,8 @@ test("ships storage, packaging, chat, and all three launch routes", async () => 
   assert.match(packageJson, /"fflate"/);
   assert.match(packageJson, /VITE_JSLIFE_MODE=pages/);
   assert.match(packageJson, /VITE_JSLIFE_MODE=desktop/);
-  assert.match(playground, /このページはブラウザ体験版です/);
-  assert.match(playground, /IS_STATIC_SHOWCASE/);
+  assert.match(playground, /AIエージェントの利用にはローカルブリッジが必要です/);
+  assert.match(playground, /IS_STATIC_SHOWCASE && chatOnline/);
   assert.match(nativeApp, /WKWebView/);
   assert.match(nativeApp, /JSLIFE_UI_ROOT/);
   assert.match(packageJson, /"dev": "node scripts\/dev\.mjs"/);

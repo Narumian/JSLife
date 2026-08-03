@@ -101,10 +101,12 @@ The static output is written to `dist-pages/`. The workflow in
 pushed. In GitHub, set **Settings → Pages → Source** to **GitHub Actions**.
 
 The static site runs the editor, renderer, browser storage, and `.jslife`
-import/export without a server. AI chat and real-folder access are intentionally
-disabled. Its Desktop panel recommends the latest Release download or cloning
-the repository and running `npm run dev`; it never attempts a loopback desktop-service
-connection.
+import/export without a server. Real-folder access still requires the desktop
+app or local dev bridge. Codex chat, however, checks for a local bridge
+(`npm run dev` or JSLIFE.app) on the same machine and connects to it when
+present; when no bridge is reachable, the Desktop panel instead recommends
+the latest Release download or cloning the repository and running
+`npm run dev`.
 
 ## Validation
 
