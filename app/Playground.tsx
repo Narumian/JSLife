@@ -386,7 +386,16 @@ export default function Playground() {
   const [codexThreadId, setCodexThreadId] = useState<string | null>(null);
   const [undoFiles, setUndoFiles] = useState<ProjectFile[] | null>(null);
   const [fileBrowserMenu, setFileBrowserMenu] = useState<{ x: number; y: number } | null>(null);
-  const [moveConfirmOpen, setMoveConfirmOpen] = useState(false);
+  const [promptModal, setPromptModal] = useState<{ title: string; defaultValue: string; onSubmit: (value: string) => void } | null>(null);
+  const [confirmModal, setConfirmModal] = useState<{ title: string; message: React.ReactNode; confirmLabel: string; onConfirm: () => void } | null>(null);
+  const promptInputRef = useRef<HTMLInputElement>(null);
+  const submitPromptModal = () => {
+    const value = promptInputRef.current?.value.trim() ?? "";
+    if (!value) return setPromptModal(null);
+    const handler = promptModal?.onSubmit;
+    setPromptModal(null);
+    handler?.(value);
+  };
   const mountRef = useRef<HTMLDivElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
   const runtimeRef = useRef<GraphicsRuntime | null>(null);
@@ -931,48 +940,62 @@ export default function Playground() {
 
   const renameProjectFile = (path: string) => {
     if (path === "main.js") return setError("main.js is the project entry and cannot be renamed");
-    const requested = window.prompt("Rename project file", path);
-    if (!requested) return;
-    const destination = normalizedProjectPath(requested);
-    if (!destination || destination.startsWith("/") || destination.split("/").includes("..")) return setError("Choose a relative project path");
-    if (projectFiles.some((file) => file.path === destination)) return setError("A project file already exists at that path");
-    const nextFiles = projectFiles.map((file) => file.path === path ? { ...file, path: destination } : file);
-    setFiles(nextFiles);
-    setOpenPaths((current) => current.map((candidate) => candidate === path ? destination : candidate));
-    if (activePath === path) setActivePath(destination);
-    setSaved(false);
+    setPromptModal({
+      title: "Rename project file",
+      defaultValue: path,
+      onSubmit: (requested) => {
+        const destination = normalizedProjectPath(requested);
+        if (!destination || destination.startsWith("/") || destination.split("/").includes("..")) return setError("Choose a relative project path");
+        if (projectFiles.some((file) => file.path === destination)) return setError("A project file already exists at that path");
+        const nextFiles = projectFiles.map((file) => file.path === path ? { ...file, path: destination } : file);
+        setFiles(nextFiles);
+        setOpenPaths((current) => current.map((candidate) => candidate === path ? destination : candidate));
+        if (activePath === path) setActivePath(destination);
+        setSaved(false);
+      },
+    });
   };
 
   const deleteProjectFile = (path: string) => {
     if (path === "main.js") return setError("main.js is the project entry and cannot be deleted");
-    if (!window.confirm(`Delete ${path} from this project?`)) return;
-    const nextFiles = projectFiles.filter((file) => file.path !== path);
-    setFiles(nextFiles);
-    setOpenPaths((current) => current.filter((candidate) => candidate !== path));
-    if (activePath === path) {
-      const fallback = nextFiles.find((file) => file.path === "main.js" && file.kind === "text") || nextFiles.find((file) => file.kind === "text");
-      if (fallback?.kind === "text") {
-        setActivePath(fallback.path);
-        setOpenPaths((current) => current.includes(fallback.path) ? current : [...current, fallback.path]);
-        setCode(fallback.content);
-      }
-    }
-    setSaved(false);
+    setConfirmModal({
+      title: "Delete file",
+      message: `Delete ${path} from this project?`,
+      confirmLabel: "Delete",
+      onConfirm: () => {
+        const nextFiles = projectFiles.filter((file) => file.path !== path);
+        setFiles(nextFiles);
+        setOpenPaths((current) => current.filter((candidate) => candidate !== path));
+        if (activePath === path) {
+          const fallback = nextFiles.find((file) => file.path === "main.js" && file.kind === "text") || nextFiles.find((file) => file.kind === "text");
+          if (fallback?.kind === "text") {
+            setActivePath(fallback.path);
+            setOpenPaths((current) => current.includes(fallback.path) ? current : [...current, fallback.path]);
+            setCode(fallback.content);
+          }
+        }
+        setSaved(false);
+      },
+    });
   };
 
   const addTextFile = () => {
-    const requested = window.prompt("New project file", "module.js");
-    if (!requested) return;
-    const path = normalizedProjectPath(requested);
-    if (!path || path.startsWith("/") || path.split("/").includes("..")) return setError("Choose a relative project path");
-    if (projectFiles.some((file) => file.path === path)) return selectFile(path);
-    const mimeType = path.endsWith(".glsl") || path.endsWith(".frag") || path.endsWith(".vert") ? "text/plain" : path.endsWith(".json") ? "application/json" : "text/javascript";
-    const file: ProjectFile = { path, kind: "text", mimeType, content: "" };
-    setFiles([...projectFiles, file]);
-    setActivePath(path);
-    setOpenPaths((current) => [...current, path]);
-    setCode("");
-    setSaved(false);
+    setPromptModal({
+      title: "New project file",
+      defaultValue: "module.js",
+      onSubmit: (requested) => {
+        const path = normalizedProjectPath(requested);
+        if (!path || path.startsWith("/") || path.split("/").includes("..")) return setError("Choose a relative project path");
+        if (projectFiles.some((file) => file.path === path)) return selectFile(path);
+        const mimeType = path.endsWith(".glsl") || path.endsWith(".frag") || path.endsWith(".vert") ? "text/plain" : path.endsWith(".json") ? "application/json" : "text/javascript";
+        const file: ProjectFile = { path, kind: "text", mimeType, content: "" };
+        setFiles([...projectFiles, file]);
+        setActivePath(path);
+        setOpenPaths((current) => [...current, path]);
+        setCode("");
+        setSaved(false);
+      },
+    });
   };
 
   const addAssets = (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -1035,25 +1058,33 @@ export default function Playground() {
   };
 
   const createBlankProject = (stayInProjectBrowser = false) => {
-    if (!saved && !window.confirm("Discard the current unsaved changes and create a blank project?")) return;
-    const nextFiles = [mainFile(BLANK_PROJECT)];
-    saveCurrentConversation();
-    setWorkspaceId(null);
-    setWorkspaceName(null);
-    workspaceFilesRef.current = [];
-    hydratedWorkspaceRef.current = null;
-    setPresetIndex(0);
-    setProjectName("Untitled Project");
-    setFiles(nextFiles);
-    setActivePath("main.js");
-    setOpenPaths(["main.js"]);
-    setCode(BLANK_PROJECT);
-    setActiveProjectId(crypto.randomUUID());
-    setSelectedProjectKey("starter:blank");
-    setUndoFiles(null);
-    setSaved(false);
-    if (!stayInProjectBrowser) setSidebarMode("files");
-    runSource(nextFiles);
+    const proceed = () => {
+      const nextFiles = [mainFile(BLANK_PROJECT)];
+      saveCurrentConversation();
+      setWorkspaceId(null);
+      setWorkspaceName(null);
+      workspaceFilesRef.current = [];
+      hydratedWorkspaceRef.current = null;
+      setPresetIndex(0);
+      setProjectName("Untitled Project");
+      setFiles(nextFiles);
+      setActivePath("main.js");
+      setOpenPaths(["main.js"]);
+      setCode(BLANK_PROJECT);
+      setActiveProjectId(crypto.randomUUID());
+      setSelectedProjectKey("starter:blank");
+      setUndoFiles(null);
+      setSaved(false);
+      if (!stayInProjectBrowser) setSidebarMode("files");
+      runSource(nextFiles);
+    };
+    if (saved) return proceed();
+    setConfirmModal({
+      title: "Discard unsaved changes?",
+      message: "Discard the current unsaved changes and create a blank project?",
+      confirmLabel: "Discard",
+      onConfirm: proceed,
+    });
   };
 
   const openLocalWorkspace = async () => {
@@ -1098,11 +1129,15 @@ export default function Playground() {
 
   const moveToLocalWorkspace = () => {
     if ((IS_STATIC_SHOWCASE && chatOnline !== true) || workspaceId) return;
-    setMoveConfirmOpen(true);
+    setConfirmModal({
+      title: "Move to Local Files?",
+      message: <>This project will be written to <code>~/Library/Application Support/JSLIFE/Projects/</code>. The browser-saved version will be kept as a backup.</>,
+      confirmLabel: "Move",
+      onConfirm: () => void performMoveToLocalWorkspace(),
+    });
   };
 
   const performMoveToLocalWorkspace = async () => {
-    setMoveConfirmOpen(false);
     try {
       const serialized = await serializeWorkspaceFiles(projectFiles);
       const response = await fetch(`${CODEX_BRIDGE}/workspaces/move`, {
@@ -1246,26 +1281,26 @@ export default function Playground() {
 
   const addProjectGroup = () => {
     if (!projectTreeMenu) return;
-    const name = window.prompt("Group name");
-    if (!name?.trim()) return;
-    const group: ProjectGroup = {
-      id: crypto.randomUUID(),
-      name: name.trim(),
-      root: projectTreeMenu.root,
-      parentId: projectTreeMenu.parentId,
-    };
-    setProjectGroups((current) => [...current, group]);
-    if (group.parentId) setCollapsedProjectGroups((current) => {
-      const next = new Set(current);
-      next.delete(`group:${group.parentId}`);
-      return next;
-    });
-    setCollapsedProjectGroups((current) => {
-      const next = new Set(current);
-      next.delete(group.root);
-      return next;
-    });
+    const { root, parentId } = projectTreeMenu;
     setProjectTreeMenu(null);
+    setPromptModal({
+      title: "Group name",
+      defaultValue: "",
+      onSubmit: (name) => {
+        const group: ProjectGroup = { id: crypto.randomUUID(), name, root, parentId };
+        setProjectGroups((current) => [...current, group]);
+        if (group.parentId) setCollapsedProjectGroups((current) => {
+          const next = new Set(current);
+          next.delete(`group:${group.parentId}`);
+          return next;
+        });
+        setCollapsedProjectGroups((current) => {
+          const next = new Set(current);
+          next.delete(group.root);
+          return next;
+        });
+      },
+    });
   };
 
   const renderProjectGroupFolders = (root: "browser" | "local", parentId: string | null, depth = 1): React.ReactNode => projectGroups
@@ -2029,13 +2064,33 @@ export default function Playground() {
         <button onClick={addProjectGroup}>Add Group</button>
       </div>}
 
-      {moveConfirmOpen && <div className="confirm-overlay" onClick={() => setMoveConfirmOpen(false)}>
+      {promptModal && <div className="confirm-overlay" onClick={() => setPromptModal(null)}>
         <div className="confirm-modal" onClick={(event) => event.stopPropagation()}>
-          <strong>Move to Local Files?</strong>
-          <p>This project will be written to <code>~/Library/Application Support/JSLIFE/Projects/</code>. The browser-saved version will be kept as a backup.</p>
+          <strong>{promptModal.title}</strong>
+          <input
+            ref={promptInputRef}
+            className="confirm-modal-input"
+            defaultValue={promptModal.defaultValue}
+            autoFocus
+            onKeyDown={(event) => {
+              if (event.key === "Enter") { event.preventDefault(); submitPromptModal(); }
+              if (event.key === "Escape") setPromptModal(null);
+            }}
+          />
           <div className="confirm-modal-actions">
-            <button className="confirm-cancel" onClick={() => setMoveConfirmOpen(false)}>Cancel</button>
-            <button className="confirm-primary" onClick={() => void performMoveToLocalWorkspace()}>Move</button>
+            <button className="confirm-cancel" onClick={() => setPromptModal(null)}>Cancel</button>
+            <button className="confirm-primary" onClick={submitPromptModal}>OK</button>
+          </div>
+        </div>
+      </div>}
+
+      {confirmModal && <div className="confirm-overlay" onClick={() => setConfirmModal(null)}>
+        <div className="confirm-modal" onClick={(event) => event.stopPropagation()}>
+          <strong>{confirmModal.title}</strong>
+          <p>{confirmModal.message}</p>
+          <div className="confirm-modal-actions">
+            <button className="confirm-cancel" onClick={() => setConfirmModal(null)}>Cancel</button>
+            <button className="confirm-primary" onClick={() => { confirmModal.onConfirm(); setConfirmModal(null); }}>{confirmModal.confirmLabel}</button>
           </div>
         </div>
       </div>}
