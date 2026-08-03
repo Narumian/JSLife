@@ -1056,7 +1056,7 @@ export default function Playground() {
   };
 
   const openLocalWorkspace = async () => {
-    if (IS_STATIC_SHOWCASE) {
+    if (IS_STATIC_SHOWCASE && chatOnline !== true) {
       setChatOpen(true);
       return;
     }
@@ -1096,7 +1096,7 @@ export default function Playground() {
   };
 
   const moveToLocalWorkspace = async () => {
-    if (IS_STATIC_SHOWCASE || workspaceId) return;
+    if ((IS_STATIC_SHOWCASE && chatOnline !== true) || workspaceId) return;
     const confirmed = window.confirm("Move this project to ~/Library/Application Support/JSLIFE/Projects/? The browser-saved version will be kept as a backup.");
     if (!confirmed) return;
     try {
@@ -1728,13 +1728,13 @@ export default function Playground() {
       <input ref={assetRef} className="visually-hidden" type="file" multiple onChange={addAssets} />
       <header className="topbar">
         <div className="brand"><span className="brand-mark">J</span><span>JSLIFE</span></div>
-        <nav className="main-nav" aria-label="Main navigation"><button className={!chatOpen && sidebarMode === "files" ? "nav-active" : ""} onClick={() => { setChatOpen(false); setSidebarMode("files"); setEditorOpen(true); }}>Studio</button><button className={sidebarMode === "library" ? "nav-active" : ""} onClick={openProjectBrowser}>Library</button><button className={chatOpen ? "nav-active" : ""} onClick={() => setChatOpen(true)}>{IS_STATIC_SHOWCASE ? "Desktop" : "Codex"}</button></nav>
+        <nav className="main-nav" aria-label="Main navigation"><button className={!chatOpen && sidebarMode === "files" ? "nav-active" : ""} onClick={() => { setChatOpen(false); setSidebarMode("files"); setEditorOpen(true); }}>Studio</button><button className={sidebarMode === "library" ? "nav-active" : ""} onClick={openProjectBrowser}>Library</button><button className={chatOpen ? "nav-active" : ""} onClick={() => setChatOpen(true)}>{IS_STATIC_SHOWCASE && chatOnline !== true ? "Desktop" : "Codex"}</button></nav>
         <div className="top-actions">
           <span className={`save-state ${saved ? "saved" : ""}`}><i />{workspaceId ? saved ? "Saved to folder" : "Saving to folder…" : saved ? "Saved in library" : "Unsaved changes"}</span>
           <button className="text-button" onClick={() => importRef.current?.click()}>Import</button>
           <button className="text-button" onClick={() => void exportProject()}>Export .jslife</button>
           <button className="save-button" onClick={() => void saveProject()} disabled={Boolean(workspaceId)}>{workspaceId ? "Auto Save" : "Save"}</button>
-          <button className="ai-button" onClick={() => setChatOpen((open) => !open)}><Icon>✦</Icon> {IS_STATIC_SHOWCASE ? "Get App" : "Codex"}</button>
+          <button className="ai-button" onClick={() => setChatOpen((open) => !open)}><Icon>✦</Icon> {IS_STATIC_SHOWCASE && chatOnline !== true ? "Get App" : "Codex"}</button>
           <button className="run-button" onClick={runCode}><Icon>▶</Icon> Run</button>
         </div>
       </header>
@@ -1751,15 +1751,15 @@ export default function Playground() {
           <button className={editorOpen && sidebarMode === "files" ? "rail-active" : ""} aria-label="Project files" aria-pressed={editorOpen && sidebarMode === "files"} onClick={() => { if (editorOpen && sidebarMode === "files") toggleEditor(); else { setSidebarMode("files"); setEditorOpen(true); } }} title="Project files"><Icon>⌘</Icon></button>
           <button aria-label="Import" onClick={() => importRef.current?.click()}><Icon>⇣</Icon></button>
           <button aria-label="Add assets" onClick={() => assetRef.current?.click()} title="Add assets"><Icon>◇</Icon></button>
-          <button className={chatOpen ? "rail-ai-active" : ""} aria-label={IS_STATIC_SHOWCASE ? "Get JSLIFE desktop" : "Codex chat"} onClick={() => setChatOpen((open) => !open)}><Icon>✦</Icon></button>
+          <button className={chatOpen ? "rail-ai-active" : ""} aria-label={IS_STATIC_SHOWCASE && chatOnline !== true ? "Get JSLIFE desktop" : "Codex chat"} onClick={() => setChatOpen((open) => !open)}><Icon>✦</Icon></button>
           <span className="rail-spacer" /><button aria-label="Settings"><Icon>⚙</Icon></button>
         </aside>
 
         <section className="editor-panel" aria-label="JavaScript module editor">
-          <div className="panel-heading"><span>{sidebarMode === "library" ? "PROJECTS" : "EDITOR"}</span><div>{sidebarMode === "library" ? <>{!IS_STATIC_SHOWCASE && <button className="asset-add" onClick={() => void openLocalWorkspace()}>Open folder</button>}{!IS_STATIC_SHOWCASE && !workspaceId && <button className="asset-add" onClick={() => void moveToLocalWorkspace()}>Move to Local Files</button>}<button className="asset-add" onClick={() => createBlankProject()}>＋ new</button><button className="asset-add" onClick={() => importRef.current?.click()}>Import</button></> : <><button className="asset-add" onClick={addTextFile} title="New text file">＋ file</button><button className="asset-add" onClick={() => assetRef.current?.click()} title="Add assets">＋ asset</button><button className="editor-code-search" onClick={openCodeSearch} title="Find in code (⌘F)" aria-label="Find in code">⌕ <kbd>⌘F</kbd></button></>}</div></div>
+          <div className="panel-heading"><span>{sidebarMode === "library" ? "PROJECTS" : "EDITOR"}</span><div>{sidebarMode === "library" ? <>{(!IS_STATIC_SHOWCASE || chatOnline === true) && <button className="asset-add" onClick={() => void openLocalWorkspace()}>Open folder</button>}{(!IS_STATIC_SHOWCASE || chatOnline === true) && !workspaceId && <button className="asset-add" onClick={() => void moveToLocalWorkspace()}>Move to Local Files</button>}<button className="asset-add" onClick={() => createBlankProject()}>＋ new</button><button className="asset-add" onClick={() => importRef.current?.click()}>Import</button></> : <><button className="asset-add" onClick={addTextFile} title="New text file">＋ file</button><button className="asset-add" onClick={() => assetRef.current?.click()} title="Add assets">＋ asset</button><button className="editor-code-search" onClick={openCodeSearch} title="Find in code (⌘F)" aria-label="Find in code">⌕ <kbd>⌘F</kbd></button></>}</div></div>
           <div className="editor-body">
             <aside className="file-browser" aria-label={sidebarMode === "library" ? "Project browser" : "Project file browser"} onContextMenu={(event) => {
-              if (IS_STATIC_SHOWCASE || sidebarMode !== "files") return;
+              if ((IS_STATIC_SHOWCASE && chatOnline !== true) || sidebarMode !== "files") return;
               event.preventDefault();
               setFileBrowserMenu({ x: Math.min(event.clientX, window.innerWidth - 210), y: Math.min(event.clientY, window.innerHeight - 48) });
             }}>
@@ -1819,7 +1819,7 @@ export default function Playground() {
                     </div>}
                   </div>
                 </div>
-                <div className="project-browser-footer">{!IS_STATIC_SHOWCASE && <button onClick={() => void openLocalWorkspace()}>Open local folder</button>}{!IS_STATIC_SHOWCASE && !workspaceId && <button onClick={() => void moveToLocalWorkspace()}>Move to Local Files</button>}<button onClick={exportLibrary} disabled={!library.length}>Backup JSON</button></div>
+                <div className="project-browser-footer">{(!IS_STATIC_SHOWCASE || chatOnline === true) && <button onClick={() => void openLocalWorkspace()}>Open local folder</button>}{(!IS_STATIC_SHOWCASE || chatOnline === true) && !workspaceId && <button onClick={() => void moveToLocalWorkspace()}>Move to Local Files</button>}<button onClick={exportLibrary} disabled={!library.length}>Backup JSON</button></div>
               </>}
             </aside>
             <div className="code-workspace">
