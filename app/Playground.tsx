@@ -12,7 +12,7 @@ type StudioPreferences = { chatOpen?: boolean; autoRun?: boolean; editorOpen?: b
 type ProjectBrowserRow = { path: string; name: string; depth: number; kind: "folder" | "file"; file?: ProjectFile };
 type FileAction = StoredChatFileAction;
 type ChatMessage = StoredChatMessage;
-type CodexResult = { message: string; action: "none" | "changes"; changes: FileAction[] };
+type CodexResult = { message: string; action: "none" | "changes" | "need_image"; changes: FileAction[] };
 type LocalWorkspaceFile = { path: string; kind: "text"; mimeType: string; content: string } | { path: string; kind: "asset"; mimeType: string; base64: string };
 type LocalWorkspaceResponse = { workspaceId: string; name: string; folderName?: string; files: LocalWorkspaceFile[] };
 type ProjectGroup = { id: string; name: string; root: "browser" | "local"; parentId: string | null };
@@ -377,6 +377,7 @@ export default function Playground() {
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
   const [chatHistoryOpen, setChatHistoryOpen] = useState(false);
   const [chatInput, setChatInput] = useState("");
+  const [forceAttachPreview, setForceAttachPreview] = useState(false);
   const [chatBusy, setChatBusy] = useState(false);
   const [chatOnline, setChatOnline] = useState<boolean | null>(null);
   const [companionNeedsPairing, setCompanionNeedsPairing] = useState(false);
@@ -1511,95 +1512,123 @@ export default function Playground() {
       : message));
   };
 
+  const postChatTurn = async (
+    payload: { message: string; previewImage: string | null; threadId: string | null },
+    signal: AbortSignal,
+    onConnected: () => void,
+  ): Promise<{ threadId: string | null; result: CodexResult | null }> => {
+    const response = await fetch(`${CODEX_BRIDGE}/chat`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(companionToken ? { "X-JSLIFE-Companion-Token": companionToken } : {}),
+      },
+      signal,
+      body: JSON.stringify({
+        message: payload.message,
+        code,
+        files: projectFiles.map((file) => file.kind === "text"
+          ? { path: file.path, kind: file.kind, mimeType: file.mimeType, content: file.content }
+          : { path: file.path, kind: file.kind, mimeType: file.mimeType, size: file.content.size }),
+        error,
+        projectName,
+        threadId: payload.threadId,
+        previewImage: payload.previewImage,
+      }),
+    });
+    onConnected();
+    setChatOnline(response.ok);
+    if (!response.ok || !response.body) {
+      const body = await response.text();
+      let detail = body;
+      try { detail = (JSON.parse(body) as { error?: string }).error || body; } catch { /* plain error body */ }
+      throw new Error(detail || `Codex bridge returned ${response.status}`);
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let threadId: string | null = null;
+    let result: CodexResult | null = null;
+    const handleEvent = (block: string) => {
+      const data = block.split("\n").filter((line) => line.startsWith("data:"))
+        .map((line) => line.slice(5).trim()).join("\n");
+      if (!data) return;
+      const event = JSON.parse(data) as {
+        type: string;
+        text?: string;
+        threadId?: string;
+        message?: string;
+        result?: CodexResult;
+      };
+      if (event.type === "status" && event.text) setChatProgress(event.text);
+      if (event.type === "thread" && event.threadId) threadId = event.threadId;
+      if (event.type === "result" && event.result) result = event.result;
+      if (event.type === "error") throw new Error(event.message || "Codex request failed");
+    };
+
+    while (true) {
+      const { done, value } = await reader.read();
+      buffer += decoder.decode(value, { stream: !done });
+      const blocks = buffer.split("\n\n");
+      buffer = blocks.pop() ?? "";
+      blocks.forEach(handleEvent);
+      if (done) break;
+    }
+    if (buffer.trim()) handleEvent(buffer);
+    return { threadId, result };
+  };
+
   const sendChat = async () => {
     const requestText = chatInput.trim();
     if (!requestText || chatBusy) return;
 
     const userMessage: ChatMessage = { id: crypto.randomUUID(), role: "user", text: requestText };
-    const previewImage = capturePreview();
+    const previewImage = forceAttachPreview ? capturePreview() : null;
     appendChat(userMessage);
     setChatInput("");
+    setForceAttachPreview(false);
     setChatBusy(true);
     setChatProgress("Codexに接続中…");
     const controller = new AbortController();
     chatAbortRef.current = controller;
     let bridgeConnected = false;
+    const markConnected = () => { bridgeConnected = true; };
 
     try {
-      const response = await fetch(`${CODEX_BRIDGE}/chat`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...(companionToken ? { "X-JSLIFE-Companion-Token": companionToken } : {}),
-        },
-        signal: controller.signal,
-        body: JSON.stringify({
-          message: requestText,
-          code,
-          files: projectFiles.map((file) => file.kind === "text"
-            ? { path: file.path, kind: file.kind, mimeType: file.mimeType, content: file.content }
-            : { path: file.path, kind: file.kind, mimeType: file.mimeType, size: file.content.size }),
-          error,
-          projectName,
-          threadId: codexThreadId,
-          previewImage,
-        }),
-      });
-      bridgeConnected = true;
-      setChatOnline(response.ok);
-      if (!response.ok || !response.body) {
-        const body = await response.text();
-        let detail = body;
-        try { detail = (JSON.parse(body) as { error?: string }).error || body; } catch { /* plain error body */ }
-        throw new Error(detail || `Codex bridge returned ${response.status}`);
+      let threadId = codexThreadId;
+      const first = await postChatTurn({ message: requestText, previewImage, threadId }, controller.signal, markConnected);
+      if (first.threadId) { threadId = first.threadId; setCodexThreadId(threadId); }
+      let result = first.result;
+
+      if (result?.action === "need_image") {
+        setChatProgress(result.message || "プレビューを確認しています…");
+        const followupImage = capturePreview();
+        const followup = await postChatTurn(
+          { message: "[system] The requested canvas screenshot is attached below.", previewImage: followupImage, threadId },
+          controller.signal,
+          markConnected,
+        );
+        if (followup.threadId) { threadId = followup.threadId; setCodexThreadId(threadId); }
+        result = followup.result;
       }
 
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-      const handleEvent = (block: string) => {
-        const data = block.split("\n").filter((line) => line.startsWith("data:"))
-          .map((line) => line.slice(5).trim()).join("\n");
-        if (!data) return;
-        const event = JSON.parse(data) as {
-          type: string;
-          text?: string;
-          threadId?: string;
-          message?: string;
-          result?: CodexResult;
-        };
-        if (event.type === "status" && event.text) setChatProgress(event.text);
-        if (event.type === "thread" && event.threadId) {
-          setCodexThreadId(event.threadId);
-        }
-        if (event.type === "result" && event.result) {
-          const proposal = event.result.action === "changes" ? event.result.changes : undefined;
-          const messageId = crypto.randomUUID();
-          const shouldAutoApply = Boolean(proposal?.length && autoRunRef.current && codeRef.current === code);
-          const validationError = proposal?.length && shouldAutoApply ? applyFileChanges(proposal, projectFiles) : null;
-          const autoApplied = shouldAutoApply && validationError === null;
-          appendChat({
-            id: messageId,
-            role: "assistant",
-            text: event.result.message,
-            changes: proposal,
-            autoApplied,
-            applied: autoApplied,
-            validationError: validationError || undefined,
-          });
-        }
-        if (event.type === "error") throw new Error(event.message || "Codex request failed");
-      };
-
-      while (true) {
-        const { done, value } = await reader.read();
-        buffer += decoder.decode(value, { stream: !done });
-        const blocks = buffer.split("\n\n");
-        buffer = blocks.pop() ?? "";
-        blocks.forEach(handleEvent);
-        if (done) break;
+      if (result) {
+        const proposal = result.action === "changes" ? result.changes : undefined;
+        const messageId = crypto.randomUUID();
+        const shouldAutoApply = Boolean(proposal?.length && autoRunRef.current && codeRef.current === code);
+        const validationError = proposal?.length && shouldAutoApply ? applyFileChanges(proposal, projectFiles) : null;
+        const autoApplied = shouldAutoApply && validationError === null;
+        appendChat({
+          id: messageId,
+          role: "assistant",
+          text: result.message,
+          changes: proposal,
+          autoApplied,
+          applied: autoApplied,
+          validationError: validationError || undefined,
+        });
       }
-      if (buffer.trim()) handleEvent(buffer);
     } catch (caught) {
       if (!bridgeConnected) setChatOnline(false);
       const cancelled = caught instanceof DOMException && caught.name === "AbortError";
@@ -1966,6 +1995,7 @@ export default function Playground() {
               <button onClick={() => setChatInput("このコードの構成を簡潔に説明して")}>説明</button>
               <button onClick={() => setChatInput("現在のエラーを診断して、必要なら修正版を提案して")}>エラー修正</button>
               <button onClick={() => setChatInput("見た目をもっと印象的にする変更を提案して")}>演出を追加</button>
+              <button className={forceAttachPreview ? "chip-active" : ""} onClick={() => setForceAttachPreview((value) => !value)} aria-pressed={forceAttachPreview} title="次の送信だけ現在の画面のスクリーンショットを添付">画面を送信{forceAttachPreview ? " ✓" : ""}</button>
             </div>
             <div className="composer-box">
               <textarea
@@ -1983,7 +2013,7 @@ export default function Playground() {
               />
               <button onClick={() => void sendChat()} disabled={!chatInput.trim() || chatBusy} aria-label="Send to Codex">↑</button>
             </div>
-            <small className="chat-privacy">テキストファイル、アセット一覧、プレビューをローカルCodexへ送信 · バイナリアセット本体は送信しません</small>
+            <small className="chat-privacy">テキストファイル、アセット一覧をローカルCodexへ送信 · プレビュー画像は「画面を送信」を選ぶか、Codexが必要と判断した場合のみ送信 · バイナリアセット本体は送信しません</small>
           </div>
           </>}
         </aside>

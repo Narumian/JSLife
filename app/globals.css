@@ -293,6 +293,7 @@ button { color: inherit; }
 .prompt-chips { margin-bottom: 6px; display: flex; gap: 5px; overflow-x: auto; }
 .prompt-chips button { flex: 0 0 auto; padding: 4px 7px; border: 1px solid #343b3f; border-radius: 10px; background: #161b1f; color: #818a86; font-size: 8px; cursor: pointer; }
 .prompt-chips button:hover { border-color: #665399; color: #c3b6ee; }
+.prompt-chips button.chip-active { border-color: var(--lime); color: var(--lime); background: #1a2016; }
 .composer-box { position: relative; border: 1px solid #3c4246; border-radius: 4px; background: #0c1013; }
 .composer-box:focus-within { border-color: #6955a0; box-shadow: 0 0 0 2px #8a5cff12; }
 .composer-box textarea { width: 100%; min-height: 66px; max-height: 150px; padding: 9px 40px 9px 10px; resize: vertical; outline: 0; border: 0; background: transparent; color: #d0d4d1; font-size: 10px; line-height: 1.45; }

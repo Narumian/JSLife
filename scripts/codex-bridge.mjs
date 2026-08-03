@@ -60,7 +60,7 @@ const outputSchema = {
   type: "object",
   properties: {
     message: { type: "string" },
-    action: { type: "string", enum: ["none", "changes"] },
+    action: { type: "string", enum: ["none", "changes", "need_image"] },
     changes: {
       type: "array",
       items: {
@@ -284,6 +284,8 @@ If the user asks for a code change, or a concrete code change is the best answer
 - dispose geometries, materials, textures, and renderer where appropriate.
 Before returning changes, lint the complete proposed project mentally: verify JavaScript syntax, JSON syntax, relative import paths, supported package imports, exported names, and the main.js lifecycle. Prefer a smaller valid change over a large speculative rewrite.
 Otherwise return action "none" and changes as an empty array.
+
+If answering well genuinely requires seeing the current render (a visual bug, a look/feel judgment, "why does this look wrong") and no screenshot is attached this turn, return action "need_image" with changes as an empty array and a short message noting you're checking the preview. You will be sent the current canvas screenshot in a follow-up turn of this same conversation; answer normally once it arrives. Do not request an image for questions answerable from code alone, and never request one when a screenshot is already attached this turn.
 
 Project: ${projectName || "Untitled sketch"}
 Runtime error: ${error || "none"}
