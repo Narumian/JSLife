@@ -30,7 +30,6 @@ const STORAGE_LOCAL_WORKSPACE_GROUPS = "jslife-local-workspace-groups-v1";
 const CODEX_BRIDGE = "http://127.0.0.1:4317";
 const APP_MODE = import.meta.env.VITE_JSLIFE_MODE || "local";
 const IS_STATIC_SHOWCASE = APP_MODE === "pages";
-const COMPANION_DOWNLOAD_URL = import.meta.env.VITE_COMPANION_DOWNLOAD_URL || "";
 const REPOSITORY_URL = "https://github.com/Narumian/JSLife";
 
 const activeChatStorageKey = (projectId: string | null) => `${STORAGE_ACTIVE_CHAT}:${projectId ?? "unscoped"}`;
@@ -1019,13 +1018,13 @@ export default function Playground() {
           });
           if (!response.ok) {
             const body = await response.json().catch(() => ({})) as { error?: string };
-            throw new Error(body.error || `Companion returned ${response.status}`);
+            throw new Error(body.error || `Desktop service returned ${response.status}`);
           }
           if (cancelled) return;
           workspaceFilesRef.current = projectFiles;
           setSaved(true);
         } catch (caught) {
-          if (!cancelled) setError(`Local save failed: ${caught instanceof Error ? caught.message : "Companion is unavailable"}`);
+          if (!cancelled) setError(`Local save failed: ${caught instanceof Error ? caught.message : "Desktop service is unavailable"}`);
         }
       })();
     }, 350);
@@ -1057,7 +1056,7 @@ export default function Playground() {
         if (activeFile?.kind === "text") setCode(activeFile.content);
         setSaved(true);
         runSource(nextFiles);
-      } catch { /* keep the IndexedDB draft when Companion is offline */ }
+      } catch { /* keep the IndexedDB draft when the desktop service is offline */ }
     })();
     return () => { cancelled = true; };
   }, [activePath, companionToken, runSource, workspaceId]);
@@ -1453,12 +1452,12 @@ export default function Playground() {
       const body = await response.json() as LocalWorkspaceResponse & { error?: string };
       if (!response.ok) {
         if (response.status === 409) return;
-        throw new Error(body.error || `Companion returned ${response.status}`);
+        throw new Error(body.error || `Desktop service returned ${response.status}`);
       }
       hydrateLocalWorkspace(body, "workspace");
       void refreshKnownWorkspaces();
     } catch (caught) {
-      setError(`Could not open local folder: ${caught instanceof Error ? caught.message : "Companion is unavailable"}`);
+      setError(`Could not open local folder: ${caught instanceof Error ? caught.message : "Desktop service is unavailable"}`);
     }
   };
 
@@ -1700,6 +1699,60 @@ export default function Playground() {
     const { root, parentId } = projectTreeMenu;
     setProjectTreeMenu(null);
     void createProjectInGroup(root, parentId);
+  };
+
+  const renameProjectGroup = (groupId: string) => {
+    const group = projectGroups.find((candidate) => candidate.id === groupId);
+    if (!group) return;
+    setPromptModal({
+      title: "Rename group",
+      defaultValue: group.name,
+      onSubmit: (name) => setProjectGroups((current) => current.map((candidate) => candidate.id === groupId ? { ...candidate, name } : candidate)),
+    });
+  };
+
+  const deleteProjectGroup = (groupId: string) => {
+    const group = projectGroups.find((candidate) => candidate.id === groupId);
+    if (!group) return;
+    setProjectGroups((current) => current
+      .filter((candidate) => candidate.id !== groupId)
+      .map((candidate) => candidate.parentId === groupId ? { ...candidate, parentId: group.parentId } : candidate));
+    const affectedProjects = library.filter((project) => project.groupId === groupId);
+    if (affectedProjects.length) {
+      setLibrary((current) => current.map((project) => project.groupId === groupId ? { ...project, groupId: group.parentId } : project));
+      for (const project of affectedProjects) void putProject({ ...project, groupId: group.parentId });
+    }
+    setLocalWorkspaceGroups((current) => {
+      let changed = false;
+      const next = { ...current };
+      for (const [workspaceId, assignedGroupId] of Object.entries(current)) {
+        if (assignedGroupId !== groupId) continue;
+        changed = true;
+        if (group.parentId) next[workspaceId] = group.parentId; else delete next[workspaceId];
+      }
+      return changed ? next : current;
+    });
+  };
+
+  const handleRenameGroupClick = () => {
+    if (!projectTreeMenu?.parentId) return;
+    const groupId = projectTreeMenu.parentId;
+    setProjectTreeMenu(null);
+    renameProjectGroup(groupId);
+  };
+
+  const handleDeleteGroupClick = () => {
+    if (!projectTreeMenu?.parentId) return;
+    const groupId = projectTreeMenu.parentId;
+    const group = projectGroups.find((candidate) => candidate.id === groupId);
+    setProjectTreeMenu(null);
+    if (!group) return;
+    setConfirmModal({
+      title: "Delete group?",
+      message: `"${group.name}"を削除します。中にあるプロジェクトは1階層上へ移動し、データは残ります。`,
+      confirmLabel: "Delete",
+      onConfirm: () => deleteProjectGroup(groupId),
+    });
   };
 
   const assignToGroup = (root: "browser" | "local", entryId: string, groupId: string | null) => {
@@ -2204,22 +2257,6 @@ export default function Playground() {
     localStorage.setItem(activeChatStorageKey(activeProjectId), conversation.id);
   };
 
-  const pairCompanion = () => {
-    const returnUrl = new URL(window.location.href);
-    returnUrl.searchParams.delete("companion_token");
-    const userAgent = navigator.userAgent;
-    const browser = userAgent.includes("Edg/")
-      ? "edge"
-      : userAgent.includes("Firefox/")
-        ? "firefox"
-        : userAgent.includes("Chrome/") || userAgent.includes("CriOS/")
-          ? "chrome"
-          : userAgent.includes("Safari/")
-            ? "safari"
-            : "default";
-    window.location.href = `jslife-companion://pair?return_url=${encodeURIComponent(returnUrl.toString())}&browser=${browser}`;
-  };
-
   return (
     <main className={`studio mode-${APP_MODE} ${chatOpen ? "chat-open" : ""} ${editorOpen ? "" : "editor-closed"} ${sidebarMode === "library" ? "sidebar-library" : ""}`}>
       <input ref={importRef} className="visually-hidden" type="file" accept=".js,.json,.jslife,text/javascript,application/json,application/x-jslife-project" onChange={importFile} />
@@ -2445,12 +2482,12 @@ export default function Playground() {
 
         <aside className="chat-panel" aria-label="Codex pair programmer">
           {IS_STATIC_SHOWCASE && chatOnline !== true ? <div className="chat-head">
-            <div className="chat-title"><i className={chatOnline === null ? "checking" : "offline"} /><span><strong>JSLIFE DESKTOP</strong><small>{chatOnline === null ? "ローカルブリッジを確認中…" : companionNeedsPairing ? "ローカルブリッジのペアリングが必要" : "ローカルブリッジ未検出"}</small></span></div>
+            <div className="chat-title"><i className={chatOnline === null ? "checking" : "offline"} /><span><strong>JSLIFE DESKTOP</strong><small>{chatOnline === null ? "ローカルブリッジを確認中…" : companionNeedsPairing ? "認証トークンが必要" : "ローカルブリッジ未検出"}</small></span></div>
             <div><button onClick={() => setChatOpen(false)} title="Close">×</button></div>
           </div> : <div className="chat-head">
             <div className="chat-title">
               <i className={chatOnline === true ? "online" : chatOnline === false ? "offline" : "checking"} />
-              <span><strong>CODEX PAIR</strong><small>{chatOnline === true ? "ChatGPTで接続済み" : chatOnline === false ? companionNeedsPairing ? "Companionのペアリングが必要" : "Companion未接続" : "接続確認中"}</small></span>
+              <span><strong>CODEX PAIR</strong><small>{chatOnline === true ? "ChatGPTで接続済み" : chatOnline === false ? companionNeedsPairing ? "認証トークンが必要" : "ローカルブリッジ未接続" : "接続確認中"}</small></span>
             </div>
             <div><button className={chatHistoryOpen ? "chat-history-active" : ""} onClick={() => setChatHistoryOpen((open) => !open)} title="Conversation history" aria-label="Conversation history">◷</button><button onClick={newChat} disabled={chatBusy} title="New chat" aria-label="New chat">＋</button><button onClick={() => setChatOpen(false)} title="Close">×</button></div>
           </div>}
@@ -2459,7 +2496,6 @@ export default function Playground() {
             <span className="static-distribution-mark">✦</span>
             <strong>AIエージェントの利用にはローカルブリッジが必要です</strong>
             <p>このページ（GitHub Pages）はコード編集、Three.jsの実行、ブラウザ内保存のみで動作します。同じ端末でJSLIFEデスクトップ版またはローカル版（npm run dev）のローカルブリッジを起動していれば、このページからもCodexチャットを利用できます。未起動の場合は下記を案内します。</p>
-            {companionNeedsPairing && <button onClick={pairCompanion}>ローカルブリッジとペアリング</button>}
             <div className="static-clone"><span>ソースから起動</span><code>git clone {REPOSITORY_URL}.git{"\n"}cd JSLife{"\n"}npm ci{"\n"}npm run dev</code></div>
             <a className="static-repository" href={REPOSITORY_URL}>GitHubリポジトリを開く</a>
           </section> : <>
@@ -2478,9 +2514,7 @@ export default function Playground() {
           </section>}
 
           {chatOnline === false && <div className="chat-offline">
-            <span>{companionNeedsPairing ? "JSLIFE Companionとペアリングしてください。" : "JSLIFE Companionを起動してください。"}</span>
-            <button onClick={pairCompanion}>{companionNeedsPairing ? "ペアリング" : "Companionを開く"}</button>
-            {companionNeedsPairing ? <code>ChatGPT認証はCompanion側で管理されます</code> : COMPANION_DOWNLOAD_URL ? <a href={COMPANION_DOWNLOAD_URL}>Companionをダウンロード</a> : <code>未導入の場合はCompanionのインストールが必要です</code>}
+            <span>{companionNeedsPairing ? "ローカルブリッジに有効な認証トークンがありません。" : "ローカルブリッジ（npm run dev または JSLIFE.app）を起動してください。"}</span>
           </div>}
 
           <div className="chat-messages">
@@ -2540,6 +2574,8 @@ export default function Playground() {
       {projectTreeMenu && <div className="file-browser-context-menu project-tree-context-menu" style={{ left: projectTreeMenu.x, top: projectTreeMenu.y }} onPointerDown={(event) => event.stopPropagation()}>
         <button onClick={handleNewProjectClick}>New Project</button>
         <button onClick={addProjectGroup}>Add Group</button>
+        {projectTreeMenu.parentId && <button onClick={handleRenameGroupClick}>Rename</button>}
+        {projectTreeMenu.parentId && <button onClick={handleDeleteGroupClick}>Delete</button>}
       </div>}
 
       {promptModal && <div className="confirm-overlay" onClick={() => setPromptModal(null)}>
