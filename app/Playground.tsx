@@ -31,8 +31,6 @@ const CODEX_BRIDGE = "http://127.0.0.1:4317";
 const APP_MODE = import.meta.env.VITE_JSLIFE_MODE || "local";
 const IS_STATIC_SHOWCASE = APP_MODE === "pages";
 const COMPANION_DOWNLOAD_URL = import.meta.env.VITE_COMPANION_DOWNLOAD_URL || "";
-const RELEASE_URL = "https://github.com/Narumian/JSLife/releases/latest";
-const RELEASE_DOWNLOAD_URL = "https://github.com/Narumian/JSLife/releases/latest/download/JSLIFE.dmg";
 const REPOSITORY_URL = "https://github.com/Narumian/JSLife";
 
 const activeChatStorageKey = (projectId: string | null) => `${STORAGE_ACTIVE_CHAT}:${projectId ?? "unscoped"}`;
@@ -2462,8 +2460,6 @@ export default function Playground() {
             <strong>AIエージェントの利用にはローカルブリッジが必要です</strong>
             <p>このページ（GitHub Pages）はコード編集、Three.jsの実行、ブラウザ内保存のみで動作します。同じ端末でJSLIFEデスクトップ版またはローカル版（npm run dev）のローカルブリッジを起動していれば、このページからもCodexチャットを利用できます。未起動の場合は下記を案内します。</p>
             {companionNeedsPairing && <button onClick={pairCompanion}>ローカルブリッジとペアリング</button>}
-            <a className="static-download" href={RELEASE_DOWNLOAD_URL}>最新Releaseをダウンロード</a>
-            <a className="static-release" href={RELEASE_URL}>Releaseページを見る</a>
             <div className="static-clone"><span>ソースから起動</span><code>git clone {REPOSITORY_URL}.git{"\n"}cd JSLife{"\n"}npm ci{"\n"}npm run dev</code></div>
             <a className="static-repository" href={REPOSITORY_URL}>GitHubリポジトリを開く</a>
           </section> : <>

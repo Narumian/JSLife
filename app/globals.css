@@ -271,8 +271,7 @@ button { color: inherit; }
 .static-distribution > strong { color: #e2e5e2; font-size: 13px; text-align: center; }
 .static-distribution > p { margin: 0 0 8px; color: #858e8a; font-size: 9px; line-height: 1.7; text-align: center; }
 .static-distribution > a { min-height: 34px; display: grid; place-items: center; border-radius: 3px; font-size: 9px; text-decoration: none; }
-.static-download { border: 1px solid var(--lime); background: var(--lime); color: #0b0e0c; font-weight: 750; }
-.static-release, .static-repository { border: 1px solid #3b4441; background: #171d20; color: #aab2ae; }
+.static-repository { border: 1px solid #3b4441; background: #171d20; color: #aab2ae; }
 .static-clone { margin-top: 8px; border: 1px solid #2e3538; background: #0b0f12; }
 .static-clone > span { display: block; padding: 7px 9px; border-bottom: 1px solid #252c2f; color: #707a76; font: 7px var(--font-geist-mono), monospace; letter-spacing: .12em; }
 .static-clone code { display: block; padding: 11px; color: #aeb9b3; white-space: pre-wrap; font: 8px/1.65 var(--font-geist-mono), monospace; user-select: text; }

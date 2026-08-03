@@ -77,8 +77,8 @@ import/export without a server. Real-folder access still requires the desktop
 app or local dev bridge. Codex chat, however, checks for a local bridge
 (`npm run dev` or JSLIFE.app) on the same machine and connects to it when
 present; when no bridge is reachable, the Desktop panel instead recommends
-the latest Release download or cloning the repository and running
-`npm run dev`.
+cloning the repository and running `npm run dev`. JSLIFE.app itself is
+distributed separately, not through this repository's GitHub Releases.
 
 ## Validation
 
