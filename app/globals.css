@@ -262,10 +262,7 @@ button { color: inherit; }
 .chat-history-list strong, .chat-history-list small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chat-history-list strong { font-size: 9px; font-weight: 560; }
 .chat-history-list small { color: #59625f; font: 7px var(--font-geist-mono), monospace; }
-.chat-offline { padding: 8px 12px; display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 5px 8px; border-bottom: 1px solid #522c29; background: #241413; color: #d99a90; font-size: 9px; }
-.chat-offline button { border: 0; background: transparent; color: #ff967f; cursor: pointer; text-decoration: underline; }
-.chat-offline a { grid-column: 1 / 3; color: #ff967f; font: 8px var(--font-geist-mono), monospace; }
-.chat-offline code { grid-column: 1 / 3; color: #9c736d; font: 8px var(--font-geist-mono), monospace; }
+.chat-offline { padding: 8px 12px; border-bottom: 1px solid #522c29; background: #241413; color: #d99a90; font-size: 9px; }
 .static-distribution { min-height: 0; flex: 1; padding: 30px 24px; display: flex; flex-direction: column; align-items: stretch; gap: 10px; overflow: auto; background: radial-gradient(circle at 50% 12%, #8a5cff18, transparent 42%); }
 .static-distribution-mark { width: 44px; height: 44px; margin: 4px auto 8px; display: grid; place-items: center; border: 1px solid #5c4a8a; border-radius: 50%; color: #c3b3ff; background: #8a5cff16; font-size: 20px; }
 .static-distribution > strong { color: #e2e5e2; font-size: 13px; text-align: center; }
