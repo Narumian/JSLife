@@ -54,6 +54,7 @@ export function dispose() {
 22. 左側を`Browser`、`Local`、`Starters`の3ルートディレクトリを持つ単一ツリーへ統合。`Browser`、`Local`、通常グループの右クリックから`Add Group`で入れ子の仮想グループを追加し、構成をブラウザへ永続保存する。
 23. GitHub Pages版の起動チェックを、静的版だからと即座にオフライン扱いにする分岐から、常にローカルブリッジへの接続確認を行う分岐へ変更。同じ端末でローカルブリッジ（`npm run dev`またはJSLIFEデスクトップ版）が起動していれば、Pages版からもCodexチャットを利用できる。未起動時はソースからの起動手順を表示する。
 24. GitHub ReleasesでのJSLIFE.app配布をやめ、Pages版の未起動時案内から「最新Releaseをダウンロード」導線を削除。`.app`は本リポジトリのRelease機能とは別の配布経路を使う。
+25. `import p5 from "p5";`をランタイムへ追加し、Three.js以外で初のサポート対象パッケージにした。p5は`noLoop()`でp5自身のアニメーションループを止め、アプリ側の`frame()`から`instance.redraw()`を呼ぶことで、Pause/Play・共通pointerとの整合を保つ。Starterの`Flow Field`（`p5.js`カテゴリ）で動作を実証。
 
 ## 3つの配布・実行モード
 
@@ -103,19 +104,19 @@ Canvas 2D の `ctx` へ毎フレーム同じコード断片を渡す方式では
 - `.jslife` Exportはmanifest、複数コード、シェーダー、画像・音声・モデルをZIPコンテナへまとめる。画像など圧縮済みアセットは無圧縮格納し、Import時に一度だけ展開してIndexedDBへ保存する。
 - ブラウザデータの消去や別端末への移動に備え、アセットを含む重要な作品は`.jslife`でExportする必要がある。
 
-## p5.jsなどへの拡張方針
+## 他ライブラリへの拡張方針
 
-現時点の実行アダプターは Three.js 用で、任意パッケージのimportにはまだ対応していない。ランタイムを次のようなアダプター単位へ分割すれば、エディターと保存ライブラリを共通のまま拡張できる。
+実行アダプターは正規表現ベースの簡易トランスパイラで、`import`文の中から許可レジストリに載っているパッケージ名だけを実物のモジュールへ差し替える。汎用のnpmパッケージimportやバンドラーではなく、対応パッケージはコード側で1つずつハードコードして追加する方式。
 
-Three.js本体に加え、現在はポストプロセス用の `EffectComposer`、`RenderPass`、`UnrealBloomPass` の名前付きaddon importもランタイムが解決する。その他のaddonを増やす場合は、アプリ側の許可レジストリとCodexプロンプトへ同時に追加する。
+現在ランタイムが解決するのは、Three.js本体、ポストプロセス用の `EffectComposer`・`RenderPass`・`UnrealBloomPass` の名前付きaddon import、そして `import p5 from "p5";` の4つ。その他のaddonやパッケージを増やす場合は、アプリ側の許可レジストリ（`app/project-runtime.ts`）とCodexプロンプト（`scripts/codex-bridge.mjs`）へ同時に追加する。
 
 - **Three.js**: WebGLRenderer / 将来のWebGPURenderer、3D、モデル、パーティクル。
-- **p5.js**: instance modeで `setup()` / `draw()` / `remove()` をライフサイクルへ接続。
+- **p5.js**（対応済み）: instance modeで`new p5(sketch, mount)`を作り、`sketch.setup`内で`noLoop()`してp5自身のループを止める。アプリの`frame()`から`instance.redraw()`を呼び、`resize()`/`dispose()`もそれぞれ`instance.resizeCanvas()`/`instance.remove()`に橋渡しすることで、Pause/Play・共通のpointerオブジェクトとの整合を保つ。
 - **Canvas 2D**: 標準CanvasRenderingContext2Dを使う軽量2Dコンテクスト。
 - **PixiJS**: 2D WebGL/WebGPUレンダラーとスプライト中心のコンテクスト。
 - **Babylon.js**: Scene / Engineの生成と破棄をアダプターへ接続。
 
-ライブラリごとに `compile`、`resize`、`frame`、`dispose` の4処理を実装し、保存データへ `runtimeId` と依存バージョンを記録する。外部パッケージを自由にimportする段階では、ブラウザ内バンドラー、import map、またはsandboxed iframe/Workerによる実行分離が必要になる。
+外部パッケージを自由にimportする段階（ユーザーが任意のnpmパッケージ名を指定できるようにする等）まで踏み込む場合は、ブラウザ内バンドラー、import map、またはsandboxed iframe/Workerによる実行分離が必要になる。
 
 ## セキュリティ上の注意
 

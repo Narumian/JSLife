@@ -300,7 +300,14 @@ The runtime injects \`mount\` into project modules. Supported PACKAGE imports ar
 - { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
 - { RenderPass } from "three/addons/postprocessing/RenderPass.js";
 - { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
-Do not add other package imports. Relative imports between project files are allowed and encouraged when they improve the project structure. Build unsupported package effects from the THREE namespace or the supported addons.
+- import p5 from "p5";
+Do not add other package imports. Relative imports between project files are allowed and encouraged when they improve the project structure. Build unsupported package effects from the THREE namespace, the supported addons, or p5.
+
+p5 projects run in instance mode and must NOT let p5 drive its own animation loop, since this app's own frame()/resize()/dispose() lifecycle owns timing, pause/resume, and the shared pointer object:
+- Construct with \`const instance = new p5((sketch) => { ... }, mount);\` and call \`sketch.noLoop();\` inside \`sketch.setup\`.
+- Export \`frame({ pointer })\` and call \`instance.redraw()\` from it (optionally stash pointer-derived values on the instance first, e.g. \`instance.pad = { x, y, down: pointer.down }\`, and read them back inside \`sketch.draw\`).
+- Export \`resize({ width, height })\` and call \`instance.resizeCanvas(width, height)\`.
+- Export \`dispose()\` and call \`instance.remove()\`.
 
 If the user asks for a code change, or a concrete code change is the best answer:
 - return action "changes" and one or more file operations;

@@ -555,9 +555,81 @@ export function dispose() {
   renderer.domElement.remove();
 }`,
   },
+  {
+    name: "Flow Field",
+    accent: "#ffb454",
+    category: "p5.js",
+    code: `import p5 from "p5";
+
+const PARTICLE_COUNT = 900;
+
+const instance = new p5((sketch) => {
+  let particles = [];
+
+  sketch.setup = () => {
+    sketch.createCanvas(mount.clientWidth, mount.clientHeight);
+    sketch.colorMode(sketch.HSB, 360, 100, 100, 100);
+    sketch.background(228, 45, 6);
+    sketch.noLoop();
+    particles = Array.from({ length: PARTICLE_COUNT }, () => ({
+      x: sketch.random(sketch.width),
+      y: sketch.random(sketch.height),
+    }));
+  };
+
+  sketch.draw = () => {
+    sketch.noStroke();
+    sketch.fill(228, 45, 6, 5);
+    sketch.rect(0, 0, sketch.width, sketch.height);
+
+    const t = sketch.frameCount * 0.0035;
+    const pad = sketch.pad || { x: sketch.width / 2, y: sketch.height / 2, down: false };
+    const hueBase = (sketch.frameCount * 0.15) % 360;
+
+    for (const particle of particles) {
+      const noiseAngle = sketch.noise(particle.x * 0.0026, particle.y * 0.0026, t) * sketch.TWO_PI * 3;
+      let vx = Math.cos(noiseAngle);
+      let vy = Math.sin(noiseAngle);
+      if (pad.down) {
+        const dx = pad.x - particle.x;
+        const dy = pad.y - particle.y;
+        const distance = Math.hypot(dx, dy) || 1;
+        vx = vx * 0.35 + (dx / distance) * 0.65;
+        vy = vy * 0.35 + (dy / distance) * 0.65;
+      }
+      particle.x += vx * 1.7;
+      particle.y += vy * 1.7;
+      if (particle.x < 0) particle.x += sketch.width;
+      if (particle.x > sketch.width) particle.x -= sketch.width;
+      if (particle.y < 0) particle.y += sketch.height;
+      if (particle.y > sketch.height) particle.y -= sketch.height;
+
+      sketch.fill((hueBase + particle.x * 0.05) % 360, 70, 95, 55);
+      sketch.circle(particle.x, particle.y, 2.4);
+    }
+  };
+}, mount);
+
+export function frame({ pointer }) {
+  instance.pad = {
+    x: (pointer.x * 0.5 + 0.5) * instance.width,
+    y: (-pointer.y * 0.5 + 0.5) * instance.height,
+    down: pointer.down,
+  };
+  instance.redraw();
+}
+
+export function resize({ width, height }) {
+  instance.resizeCanvas(width, height);
+}
+
+export function dispose() {
+  instance.remove();
+}`,
+  },
 ];
 
-const STARTER_CATEGORIES = ["Basics", "Particles", "Instancing", "Feedback"];
+const STARTER_CATEGORIES = ["Basics", "Particles", "Instancing", "Feedback", "p5.js"];
 
 const BLANK_PROJECT = `import * as THREE from "three";
 

@@ -41,6 +41,9 @@ test("ships storage, packaging, chat, and all three launch routes", async () => 
   assert.match(packaging, /unzipSync/);
   assert.match(runtime, /resolvePath/);
   assert.match(runtime, /assetUrl/);
+  assert.match(runtime, /__P5/);
+  assert.match(playground, /Flow Field/);
+  assert.match(bridge, /import p5 from "p5"/);
   assert.match(playground, /type="file" multiple/);
   assert.match(playground, /conversation\.projectId === activeProjectId/);
   assert.match(playground, /activeChatStorageKey\(activeProjectId\)/);
