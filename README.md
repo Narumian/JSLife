@@ -5,34 +5,6 @@ multi-file Three.js projects. Projects, drafts, preferences, and Codex chat
 history remain on the current device and can be imported or exported as
 `.jslife` packages.
 
-## XY / KAOSS pad interaction
-
-Unless a project explicitly specifies a different interaction model, the
-graphics stage is touch-first and behaves like an XY/KAOSS pad. A touch, pen
-press, or mouse press establishes the control position; dragging updates it,
-and releasing keeps the last XY value. Hover movement alone does not change
-project parameters. When touch and mouse input overlap, touch takes priority.
-
-The `pointer` object passed to `frame()` contains:
-
-- `x`, `y`: normalized XY values from `-1` to `1`; the last values remain after release.
-- `px`, `py`: pixel coordinates inside the graphics stage.
-- `down`: `true` only while the active touch, pen, or mouse button is held.
-- `pressure`: device pressure when available, otherwise the browser pointer value.
-- `kind`: `"touch"`, `"pen"`, or `"mouse"`.
-
-```js
-export function frame({ time, pointer }) {
-  // Continuous KAOSS-pad parameters: the last touched position stays active.
-  effect.speed = THREE.MathUtils.mapLinear(pointer.y, -1, 1, 0.15, 2.0);
-  effect.colorShift = pointer.x;
-
-  // Gate an event so it runs only while the surface is pressed.
-  effect.energy = pointer.down ? 0.5 + pointer.pressure : 0.08;
-  renderer.render(scene, camera);
-}
-```
-
 ## Requirements
 
 - Node.js `>=22.13.0`

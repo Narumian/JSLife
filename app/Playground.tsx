@@ -5,7 +5,7 @@ import { packProject, unpackProject } from "./jslife-package";
 import { compileProject, disposeScene, validateProject, type GraphicsRuntime, type PointerState, type ResizeArgs } from "./project-runtime";
 import { getDraft, listChatConversations, listProjects, putChatConversation, putDraft, putProject, removeProject, type ChatConversationRecord, type ProjectFile, type ProjectRecord, type StoredChatFileAction, type StoredChatMessage } from "./project-store";
 
-type Preset = { name: string; accent: string; code: string };
+type Preset = { name: string; accent: string; code: string; category?: string; detail?: string };
 type LegacyProject = { id: string; name: string; code: string; updatedAt: string };
 type LegacyDraft = { projectName?: string; code?: string; activeProjectId?: string | null; saved?: boolean };
 type StudioPreferences = { chatOpen?: boolean; autoRun?: boolean; editorOpen?: boolean; openPaths?: string[]; sidebarMode?: "files" | "library" };
@@ -148,6 +148,7 @@ export function dispose() {
   {
     name: "Particle Current",
     accent: "#6fe7ff",
+    category: "Particles",
     code: `import * as THREE from "three";
 
 const scene = new THREE.Scene();
@@ -206,6 +207,7 @@ export function dispose() {
   {
     name: "Instanced Field",
     accent: "#ff7456",
+    category: "Instancing",
     code: `import * as THREE from "three";
 
 const scene = new THREE.Scene();
@@ -264,7 +266,301 @@ export function dispose() {
   renderer.dispose();
 }`,
   },
+  {
+    name: "Material Study",
+    accent: "#ff9d5c",
+    category: "Basics",
+    code: `import * as THREE from "three";
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x05070a);
+scene.fog = new THREE.FogExp2(0x05070a, 0.05);
+
+const camera = new THREE.PerspectiveCamera(42, 1, 0.1, 100);
+camera.position.set(0, 0.6, 8);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.1;
+mount.appendChild(renderer.domElement);
+
+// A soft vertical gradient backdrop, lit from the inside of a large sphere.
+const backdropGeometry = new THREE.SphereGeometry(40, 32, 32);
+const backdropMaterial = new THREE.ShaderMaterial({
+  side: THREE.BackSide,
+  depthWrite: false,
+  uniforms: {
+    top: { value: new THREE.Color(0x141c2b) },
+    bottom: { value: new THREE.Color(0x05060a) },
+  },
+  vertexShader: \`
+    varying vec3 vPos;
+    void main() {
+      vPos = position;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  \`,
+  fragmentShader: \`
+    uniform vec3 top;
+    uniform vec3 bottom;
+    varying vec3 vPos;
+    void main() {
+      float h = normalize(vPos).y * 0.5 + 0.5;
+      gl_FragColor = vec4(mix(bottom, top, h), 1.0);
+    }
+  \`,
+});
+const backdrop = new THREE.Mesh(backdropGeometry, backdropMaterial);
+scene.add(backdrop);
+
+// Classic 3-point lighting: warm key, cool fill, bright rim.
+const key = new THREE.DirectionalLight(0xffe3b0, 3.4);
+key.position.set(4, 5, 4);
+scene.add(key);
+const fill = new THREE.DirectionalLight(0x7fb2ff, 1.4);
+fill.position.set(-5, 1, 2);
+scene.add(fill);
+const rim = new THREE.DirectionalLight(0xffffff, 2.2);
+rim.position.set(-2, 3, -5);
+scene.add(rim);
+scene.add(new THREE.HemisphereLight(0x33415a, 0x0a0a0d, 0.6));
+
+const group = new THREE.Group();
+scene.add(group);
+
+// Three fundamental PBR looks: glossy clearcoat, polished metal, soft matte clay.
+const sphere = new THREE.Mesh(
+  new THREE.SphereGeometry(1.05, 96, 96),
+  new THREE.MeshPhysicalMaterial({ color: 0xff9d5c, metalness: 0.05, roughness: 0.18, clearcoat: 1, clearcoatRoughness: 0.08 })
+);
+sphere.position.set(-2.1, 0.2, 0);
+group.add(sphere);
+
+const torus = new THREE.Mesh(
+  new THREE.TorusGeometry(0.95, 0.34, 64, 128),
+  new THREE.MeshPhysicalMaterial({ color: 0xcfe4ff, metalness: 1, roughness: 0.06 })
+);
+torus.position.set(2.1, -0.1, -0.4);
+torus.rotation.x = Math.PI / 3;
+group.add(torus);
+
+const clay = new THREE.Mesh(
+  new THREE.IcosahedronGeometry(1, 2),
+  new THREE.MeshPhysicalMaterial({ color: 0xd9c9ff, metalness: 0, roughness: 0.85 })
+);
+clay.position.set(0, 1.35, -1.6);
+group.add(clay);
+
+export function frame({ time, pointer }) {
+  sphere.rotation.y = time * 0.22;
+  torus.rotation.z = time * 0.16;
+  clay.rotation.y = -time * 0.14;
+  clay.rotation.x = time * 0.09;
+
+  group.rotation.y += (pointer.x * 0.5 - group.rotation.y) * 0.04;
+  camera.position.y += (0.6 + pointer.y * 0.8 - camera.position.y) * 0.04;
+  camera.lookAt(0, 0.2, 0);
+
+  renderer.render(scene, camera);
+}
+
+export function resize({ width, height, pixelRatio }) {
+  renderer.setPixelRatio(Math.min(pixelRatio, 2));
+  renderer.setSize(width, height, false);
+  camera.aspect = width / height;
+  camera.updateProjectionMatrix();
+}
+
+export function dispose() {
+  backdropGeometry.dispose();
+  backdropMaterial.dispose();
+  sphere.geometry.dispose();
+  sphere.material.dispose();
+  torus.geometry.dispose();
+  torus.material.dispose();
+  clay.geometry.dispose();
+  clay.material.dispose();
+  renderer.dispose();
+  renderer.domElement.remove();
+}`,
+  },
+  {
+    name: "Comet Trails",
+    accent: "#7fd9ff",
+    category: "Feedback",
+    code: `import * as THREE from "three";
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.2;
+mount.appendChild(renderer.domElement);
+
+let targetA = new THREE.WebGLRenderTarget(2, 2, { depthBuffer: false });
+let targetB = new THREE.WebGLRenderTarget(2, 2, { depthBuffer: false });
+const fullscreenGeometry = new THREE.PlaneGeometry(2, 2);
+
+// Feedback pass: read the previous frame, fade it, and zoom it slightly toward center.
+const feedbackScene = new THREE.Scene();
+const feedbackCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+const feedbackUniforms = { uPrevious: { value: null }, uDecay: { value: 0.95 }, uZoom: { value: 1.008 } };
+const feedbackMaterial = new THREE.ShaderMaterial({
+  uniforms: feedbackUniforms,
+  depthTest: false,
+  depthWrite: false,
+  vertexShader: \`
+    varying vec2 vUv;
+    void main() {
+      vUv = uv;
+      gl_Position = vec4(position.xy, 0.0, 1.0);
+    }
+  \`,
+  fragmentShader: \`
+    uniform sampler2D uPrevious;
+    uniform float uDecay;
+    uniform float uZoom;
+    varying vec2 vUv;
+    void main() {
+      vec2 centered = (vUv - 0.5) / uZoom + 0.5;
+      vec3 previous = texture2D(uPrevious, centered).rgb;
+      gl_FragColor = vec4(previous * uDecay, 1.0);
+    }
+  \`,
+});
+const feedbackQuad = new THREE.Mesh(fullscreenGeometry, feedbackMaterial);
+feedbackScene.add(feedbackQuad);
+
+// The moving comet, additively composited on top of the decaying trail each frame.
+const scene = new THREE.Scene();
+const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+
+const comet = new THREE.Mesh(
+  new THREE.CircleGeometry(0.045, 48),
+  new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false })
+);
+scene.add(comet);
+
+const haloUniforms = { uColor: { value: new THREE.Color(0x7fd9ff) } };
+const halo = new THREE.Mesh(
+  new THREE.CircleGeometry(0.14, 48),
+  new THREE.ShaderMaterial({
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+    uniforms: haloUniforms,
+    vertexShader: \`
+      varying vec2 vUv;
+      void main() {
+        vUv = uv;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    \`,
+    fragmentShader: \`
+      uniform vec3 uColor;
+      varying vec2 vUv;
+      void main() {
+        float d = distance(vUv, vec2(0.5));
+        float glow = smoothstep(0.5, 0.0, d);
+        gl_FragColor = vec4(uColor * glow, glow);
+      }
+    \`,
+  })
+);
+scene.add(halo);
+
+// Copy the accumulated buffer to the screen.
+const screenUniforms = { uTexture: { value: null } };
+const screenMaterial = new THREE.ShaderMaterial({
+  uniforms: screenUniforms,
+  depthTest: false,
+  depthWrite: false,
+  vertexShader: \`
+    varying vec2 vUv;
+    void main() {
+      vUv = uv;
+      gl_Position = vec4(position.xy, 0.0, 1.0);
+    }
+  \`,
+  fragmentShader: \`
+    uniform sampler2D uTexture;
+    varying vec2 vUv;
+    void main() {
+      gl_FragColor = texture2D(uTexture, vUv);
+    }
+  \`,
+});
+const screenScene = new THREE.Scene();
+const screenQuad = new THREE.Mesh(fullscreenGeometry, screenMaterial);
+screenScene.add(screenQuad);
+
+let cometX = 0;
+let cometY = 0;
+
+export function frame({ time, pointer }) {
+  const ease = pointer.down ? 0.35 : 0.06;
+  cometX += (pointer.x * 0.85 - cometX) * ease;
+  cometY += (pointer.y * 0.85 - cometY) * ease;
+  const wanderX = Math.sin(time * 0.6) * (pointer.down ? 0.02 : 0.18);
+  const wanderY = Math.cos(time * 0.5) * (pointer.down ? 0.02 : 0.14);
+  comet.position.set(cometX + wanderX, cometY + wanderY, 0);
+  halo.position.copy(comet.position);
+
+  const hue = (time * 0.05) % 1;
+  haloUniforms.uColor.value.setHSL(hue, 0.75, 0.62);
+  comet.material.color.setHSL(hue, 0.35, pointer.down ? 0.95 : 0.85);
+  feedbackUniforms.uDecay.value = pointer.down ? 0.965 : 0.945;
+
+  feedbackUniforms.uPrevious.value = targetA.texture;
+  renderer.setRenderTarget(targetB);
+  renderer.render(feedbackScene, feedbackCamera);
+
+  renderer.autoClear = false;
+  renderer.render(scene, camera);
+  renderer.autoClear = true;
+  renderer.setRenderTarget(null);
+
+  screenUniforms.uTexture.value = targetB.texture;
+  renderer.render(screenScene, camera);
+
+  const swap = targetA;
+  targetA = targetB;
+  targetB = swap;
+}
+
+export function resize({ width, height, pixelRatio }) {
+  const ratio = Math.min(pixelRatio, 2);
+  renderer.setPixelRatio(ratio);
+  renderer.setSize(width, height, false);
+  const w = Math.max(1, Math.floor(width * ratio));
+  const h = Math.max(1, Math.floor(height * ratio));
+  targetA.setSize(w, h);
+  targetB.setSize(w, h);
+  const aspect = width / height;
+  camera.left = -aspect;
+  camera.right = aspect;
+  camera.top = 1;
+  camera.bottom = -1;
+  camera.updateProjectionMatrix();
+}
+
+export function dispose() {
+  targetA.dispose();
+  targetB.dispose();
+  fullscreenGeometry.dispose();
+  feedbackMaterial.dispose();
+  screenMaterial.dispose();
+  comet.geometry.dispose();
+  comet.material.dispose();
+  halo.geometry.dispose();
+  halo.material.dispose();
+  renderer.dispose();
+  renderer.domElement.remove();
+}`,
+  },
 ];
+
+const STARTER_CATEGORIES = ["Basics", "Particles", "Instancing", "Feedback"];
 
 const BLANK_PROJECT = `import * as THREE from "three";
 
@@ -1466,12 +1762,14 @@ export default function Playground() {
             loaded: project.id === activeProjectId,
             package: true,
             draggable: true,
+            indent: 9 + (depth + 1) * 13 + 14,
             onDragStart: handleProjectDragStart("browser", project.id),
             onDelete: () => { void removeProject(project.id); setLibrary((current) => current.filter((item) => item.id !== project.id)); if (selectedProjectKey === key) selectExplorerProject("workspace"); },
           }); })}
           {groupWorkspaces.map((entry) => renderExplorerProject(`known:${entry.workspaceId}`, entry.name, entry.exists ? entry.folderName : "Folder not found", {
             package: true,
             draggable: true,
+            indent: 9 + (depth + 1) * 13 + 14,
             onDragStart: handleProjectDragStart("local", entry.workspaceId),
           }))}
         </>}
@@ -1482,7 +1780,7 @@ export default function Playground() {
     key: string,
     name: string,
     detail: string,
-    options?: { accent?: string; blank?: boolean; loaded?: boolean; package?: boolean; onDelete?: () => void; draggable?: boolean; onDragStart?: (event: React.DragEvent) => void },
+    options?: { accent?: string; blank?: boolean; loaded?: boolean; package?: boolean; onDelete?: () => void; draggable?: boolean; onDragStart?: (event: React.DragEvent) => void; indent?: number },
   ) => {
     return <div
       className={`project-explorer-entry${selectedProjectKey === key ? " project-explorer-selected" : ""}${options?.loaded ? " project-explorer-loaded" : ""}`}
@@ -1491,7 +1789,7 @@ export default function Playground() {
       onDragStart={options?.onDragStart}
     >
       <div className="project-explorer-project">
-        <button id={`project-${key.replace(/[^a-z0-9_-]/gi, "-")}`} role="option" aria-selected={selectedProjectKey === key} className="project-explorer-select" onClick={() => selectExplorerProject(key)} onDoubleClick={() => activateProjectSelection(key)}>
+        <button id={`project-${key.replace(/[^a-z0-9_-]/gi, "-")}`} role="option" aria-selected={selectedProjectKey === key} className="project-explorer-select" style={options?.indent !== undefined ? { paddingLeft: options.indent } : undefined} onClick={() => selectExplorerProject(key)} onDoubleClick={() => activateProjectSelection(key)}>
           <i className={options?.blank ? "project-explorer-blank" : options?.package ? "project-explorer-package" : ""} style={{ "--swatch": options?.accent ?? "var(--purple)" } as React.CSSProperties}>{options?.blank ? "＋" : options?.package ? "J" : "▱"}</i>
           <span><strong>{name}{options?.package && !name.endsWith(".jslife") ? ".jslife" : ""}</strong><small>{detail}</small></span>
         </button>
@@ -2025,7 +2323,19 @@ export default function Playground() {
                     <button className="project-tree-root project-tree-root-readonly" onClick={() => toggleProjectGroup("starters")}><span>{collapsedProjectGroups.has("starters") ? "▸" : "▾"}</span><i>▱</i><strong>Starters</strong><small>{PRESETS.length + 1}</small></button>
                     {!collapsedProjectGroups.has("starters") && <div className="project-tree-children">
                       {renderExplorerProject("starter:blank", "Blank Three.js", "Minimal Three.js scene", { blank: true })}
-                      {PRESETS.map((preset, index) => renderExplorerProject(`starter:${index}`, preset.name, "Three.js starter", { accent: preset.accent }))}
+                      {PRESETS.map((preset, index) => !preset.category && renderExplorerProject(`starter:${index}`, preset.name, preset.detail ?? "Three.js starter", { accent: preset.accent }))}
+                      {STARTER_CATEGORIES.map((category) => {
+                        const items = PRESETS.map((preset, index) => ({ preset, index })).filter(({ preset }) => preset.category === category);
+                        if (!items.length) return null;
+                        const collapseKey = `starter-category:${category}`;
+                        const collapsed = collapsedProjectGroups.has(collapseKey);
+                        return <div className="project-tree-folder-node" key={category}>
+                          <button className="project-tree-folder" style={{ paddingLeft: 22 }} onClick={() => toggleProjectGroup(collapseKey)}>
+                            <span>{collapsed ? "▸" : "▾"}</span><i>▱</i><strong>{category}</strong><small>{items.length}</small>
+                          </button>
+                          {!collapsed && items.map(({ preset, index }) => renderExplorerProject(`starter:${index}`, preset.name, preset.detail ?? "Three.js starter", { accent: preset.accent, indent: 49 }))}
+                        </div>;
+                      })}
                     </div>}
                   </div>
                 </div>
