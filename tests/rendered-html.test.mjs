@@ -41,6 +41,9 @@ test("ships storage, packaging, chat, and all three launch routes", async () => 
   assert.match(packaging, /unzipSync/);
   assert.match(runtime, /resolvePath/);
   assert.match(runtime, /assetUrl/);
+  assert.match(runtime, /__P5/);
+  assert.match(playground, /Flow Field/);
+  assert.match(bridge, /import p5 from "p5"/);
   assert.match(playground, /type="file" multiple/);
   assert.match(playground, /conversation\.projectId === activeProjectId/);
   assert.match(playground, /activeChatStorageKey\(activeProjectId\)/);
@@ -53,7 +56,7 @@ test("ships storage, packaging, chat, and all three launch routes", async () => 
   assert.match(playground, />Browser</);
   assert.match(playground, />Local</);
   assert.match(playground, />Starters</);
-  assert.match(playground, /STARTER_CATEGORIES/);
+  assert.match(playground, /STARTER_RUNTIMES/);
   assert.match(playground, /Material Study/);
   assert.match(playground, /Comet Trails/);
   assert.match(playground, /setPointerCapture/);

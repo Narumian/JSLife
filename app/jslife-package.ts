@@ -6,7 +6,7 @@ type Manifest = {
   version: 1;
   name: string;
   entry: string;
-  runtimeId: "three";
+  runtimeId: "three" | "p5";
   files: Array<{ path: string; kind: ProjectFile["kind"]; mimeType: string }>;
 };
 
@@ -61,7 +61,7 @@ export async function unpackProject(file: File): Promise<ProjectRecord> {
     id: crypto.randomUUID(),
     name: manifest.name || file.name.replace(/\.jslife$/i, ""),
     entry,
-    runtimeId: manifest.runtimeId === "three" ? "three" : "three",
+    runtimeId: manifest.runtimeId === "p5" ? "p5" : "three",
     files,
     updatedAt: new Date().toISOString(),
   };

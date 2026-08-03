@@ -18,7 +18,7 @@ export type ProjectRecord = {
   id: string;
   name: string;
   entry: string;
-  runtimeId: "three";
+  runtimeId: "three" | "p5";
   files: ProjectFile[];
   updatedAt: string;
   groupId?: string | null;
@@ -29,7 +29,7 @@ export type DraftRecord = {
   projectId: string | null;
   name: string;
   entry: string;
-  runtimeId: "three";
+  runtimeId: "three" | "p5";
   files: ProjectFile[];
   activePath: string;
   saved: boolean;

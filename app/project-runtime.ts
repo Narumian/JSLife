@@ -2,6 +2,7 @@ import * as THREE from "three";
 import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
 import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
 import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
+import p5 from "p5";
 import type { ProjectFile } from "./project-store";
 
 export type PointerState = {
@@ -78,6 +79,7 @@ const importBindings = (bindings: string, request: string): string => {
 const transformModule = (source: string, path: string, paths: Set<string>) => {
   const exported = new Set<string>();
   let executable = source.replace(/import\s+\*\s+as\s+THREE\s+from\s+["']three["'];?/g, "const THREE = __THREE;");
+  executable = executable.replace(/import\s+p5\s+from\s+["']p5["'];?/g, "const p5 = __P5;");
   executable = executable.replace(/import\s*\{([^}]+)\}\s*from\s*["'](three\/addons\/[^"']+)["'];?/g, (_statement, bindings: string, modulePath: string) => {
     const addonModule = THREE_ADDONS[modulePath];
     if (!addonModule) throw new Error(`Unsupported Three.js addon import: ${modulePath}`);
@@ -153,7 +155,7 @@ export function validateProject(files: ProjectFile[], entry = "main.js") {
     if (extension !== "js" && extension !== "mjs") continue;
     const transformed = transformModule(file.content, file.path, paths);
     try {
-      new Function("__THREE", "__THREE_ADDONS", "mount", "viewport", "__asset", "__require", "__exports", `"use strict";\n${transformed}`);
+      new Function("__THREE", "__THREE_ADDONS", "__P5", "mount", "viewport", "__asset", "__require", "__exports", `"use strict";\n${transformed}`);
     } catch (error) {
       throw new Error(`${file.path}: ${error instanceof Error ? error.message : "Invalid JavaScript"}`);
     }
@@ -185,7 +187,7 @@ export function compileProject(files: ProjectFile[], entry: string, mount: HTMLD
     }
     return `${JSON.stringify(file.path)}: (__require, __exports) => { ${transformModule(file.content, file.path, paths)} }`;
   }).join(",\n");
-  const factory = new Function("__THREE", "__THREE_ADDONS", "mount", "viewport", "__asset", `
+  const factory = new Function("__THREE", "__THREE_ADDONS", "__P5", "mount", "viewport", "__asset", `
     "use strict";
     const __modules = { ${modules} };
     const __cache = {};
@@ -201,7 +203,7 @@ export function compileProject(files: ProjectFile[], entry: string, mount: HTMLD
     return __require(${JSON.stringify(entry)});
   `);
   try {
-    const exports = factory(THREE, THREE_ADDONS, mount, viewport, assetUrl) as GraphicsRuntime;
+    const exports = factory(THREE, THREE_ADDONS, p5, mount, viewport, assetUrl) as GraphicsRuntime;
     const userDispose = exports.dispose;
     return {
       ...exports,

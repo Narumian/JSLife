@@ -5,7 +5,8 @@ import { packProject, unpackProject } from "./jslife-package";
 import { compileProject, disposeScene, validateProject, type GraphicsRuntime, type PointerState, type ResizeArgs } from "./project-runtime";
 import { getDraft, listChatConversations, listProjects, putChatConversation, putDraft, putProject, removeProject, type ChatConversationRecord, type ProjectFile, type ProjectRecord, type StoredChatFileAction, type StoredChatMessage } from "./project-store";
 
-type Preset = { name: string; accent: string; code: string; category?: string; detail?: string };
+type Preset = { name: string; accent: string; code: string; runtime: "three" | "p5"; category?: string; detail?: string };
+const RUNTIME_LABELS: Record<"three" | "p5", string> = { three: "Three.js", p5: "p5.js" };
 type LegacyProject = { id: string; name: string; code: string; updatedAt: string };
 type LegacyDraft = { projectName?: string; code?: string; activeProjectId?: string | null; saved?: boolean };
 type StudioPreferences = { chatOpen?: boolean; autoRun?: boolean; editorOpen?: boolean; openPaths?: string[]; sidebarMode?: "files" | "library" };
@@ -79,6 +80,7 @@ const PRESETS: Preset[] = [
   {
     name: "Neon Knot",
     accent: "#c8ff45",
+    runtime: "three",
     code: `import * as THREE from "three";
 
 const scene = new THREE.Scene();
@@ -145,6 +147,7 @@ export function dispose() {
   {
     name: "Particle Current",
     accent: "#6fe7ff",
+    runtime: "three",
     category: "Particles",
     code: `import * as THREE from "three";
 
@@ -204,6 +207,7 @@ export function dispose() {
   {
     name: "Instanced Field",
     accent: "#ff7456",
+    runtime: "three",
     category: "Instancing",
     code: `import * as THREE from "three";
 
@@ -266,6 +270,7 @@ export function dispose() {
   {
     name: "Material Study",
     accent: "#ff9d5c",
+    runtime: "three",
     category: "Basics",
     code: `import * as THREE from "three";
 
@@ -385,6 +390,7 @@ export function dispose() {
   {
     name: "Comet Trails",
     accent: "#7fd9ff",
+    runtime: "three",
     category: "Feedback",
     code: `import * as THREE from "three";
 
@@ -555,9 +561,84 @@ export function dispose() {
   renderer.domElement.remove();
 }`,
   },
+  {
+    name: "Flow Field",
+    accent: "#ffb454",
+    runtime: "p5",
+    code: `import p5 from "p5";
+
+const PARTICLE_COUNT = 900;
+
+const instance = new p5((sketch) => {
+  let particles = [];
+
+  sketch.setup = () => {
+    sketch.createCanvas(mount.clientWidth, mount.clientHeight);
+    sketch.colorMode(sketch.HSB, 360, 100, 100, 100);
+    sketch.background(228, 45, 6);
+    sketch.noLoop();
+    particles = Array.from({ length: PARTICLE_COUNT }, () => ({
+      x: sketch.random(sketch.width),
+      y: sketch.random(sketch.height),
+    }));
+  };
+
+  sketch.draw = () => {
+    sketch.noStroke();
+    sketch.fill(228, 45, 6, 5);
+    sketch.rect(0, 0, sketch.width, sketch.height);
+
+    const t = sketch.frameCount * 0.0035;
+    const pad = sketch.pad || { x: sketch.width / 2, y: sketch.height / 2, down: false };
+    const hueBase = (sketch.frameCount * 0.15) % 360;
+
+    for (const particle of particles) {
+      const noiseAngle = sketch.noise(particle.x * 0.0026, particle.y * 0.0026, t) * sketch.TWO_PI * 3;
+      let vx = Math.cos(noiseAngle);
+      let vy = Math.sin(noiseAngle);
+      if (pad.down) {
+        const dx = pad.x - particle.x;
+        const dy = pad.y - particle.y;
+        const distance = Math.hypot(dx, dy) || 1;
+        vx = vx * 0.35 + (dx / distance) * 0.65;
+        vy = vy * 0.35 + (dy / distance) * 0.65;
+      }
+      particle.x += vx * 1.7;
+      particle.y += vy * 1.7;
+      if (particle.x < 0) particle.x += sketch.width;
+      if (particle.x > sketch.width) particle.x -= sketch.width;
+      if (particle.y < 0) particle.y += sketch.height;
+      if (particle.y > sketch.height) particle.y -= sketch.height;
+
+      sketch.fill((hueBase + particle.x * 0.05) % 360, 70, 95, 55);
+      sketch.circle(particle.x, particle.y, 2.4);
+    }
+  };
+}, mount);
+
+export function frame({ pointer }) {
+  instance.pad = {
+    x: (pointer.x * 0.5 + 0.5) * instance.width,
+    y: (-pointer.y * 0.5 + 0.5) * instance.height,
+    down: pointer.down,
+  };
+  instance.redraw();
+}
+
+export function resize({ width, height }) {
+  instance.resizeCanvas(width, height);
+}
+
+export function dispose() {
+  instance.remove();
+}`,
+  },
 ];
 
-const STARTER_CATEGORIES = ["Basics", "Particles", "Instancing", "Feedback"];
+const STARTER_RUNTIMES: { runtime: "three" | "p5"; categories: string[] }[] = [
+  { runtime: "three", categories: ["Basics", "Particles", "Instancing", "Feedback"] },
+  { runtime: "p5", categories: [] },
+];
 
 const BLANK_PROJECT = `import * as THREE from "three";
 
@@ -599,6 +680,10 @@ export function dispose() {
 const safeName = (value: string) => value.trim().replace(/[^a-z0-9-_]+/gi, "-").replace(/^-|-$/g, "") || "sketch";
 const mainFile = (content: string): ProjectFile => ({ path: "main.js", kind: "text", mimeType: "text/javascript", content });
 const isEditable = (file: ProjectFile) => file.kind === "text";
+const detectRuntime = (files: ProjectFile[], entry = "main.js"): "three" | "p5" => {
+  const entryFile = files.find((file) => file.path === entry);
+  return entryFile?.kind === "text" && /\bfrom\s+["']p5["']/.test(entryFile.content) ? "p5" : "three";
+};
 const chatTitle = (messages: ChatMessage[]) => {
   const firstRequest = messages.find((message) => message.role === "user")?.text.trim();
   return firstRequest ? `${firstRequest.slice(0, 34)}${firstRequest.length > 34 ? "…" : ""}` : "新しい会話";
@@ -730,6 +815,7 @@ export default function Playground() {
 
   const lines = useMemo(() => code.split("\n").length, [code]);
   const projectFiles = useMemo(() => files.map((file) => file.path === activePath && file.kind === "text" ? { ...file, content: code } : file), [activePath, code, files]);
+  const runtimeId = useMemo(() => detectRuntime(projectFiles), [projectFiles]);
   const projectBrowserRows = useMemo(() => buildProjectBrowserRows(projectFiles, collapsedFolders), [collapsedFolders, projectFiles]);
   const visibleLibrary = useMemo(
     () => library.filter((project) => !(workspaceId && project.id === activeProjectId)),
@@ -755,7 +841,7 @@ export default function Playground() {
     if (selectedProjectKey === "starter:blank") return { name: "Blank Three.js", files: [mainFile(BLANK_PROJECT)], detail: "Starter · Three.js" };
     if (selectedProjectKey.startsWith("starter:")) {
       const preset = PRESETS[Number(selectedProjectKey.slice("starter:".length))];
-      if (preset) return { name: preset.name, files: [mainFile(preset.code)], detail: "Starter · Three.js" };
+      if (preset) return { name: preset.name, files: [mainFile(preset.code)], detail: preset.detail ?? `Starter · ${RUNTIME_LABELS[preset.runtime]}` };
     }
     return { name: projectName, files: projectFiles, detail: `Workspace · ${saved ? "saved" : "unsaved"}` };
   }, [library, projectFiles, projectName, saved, selectedProjectKey]);
@@ -867,7 +953,7 @@ export default function Playground() {
       setResolution({ width: viewport.width, height: viewport.height });
       setError(null);
       setSaved(false);
-      void putDraft({ id: "current", projectId: activeProjectId, name: projectName, entry: "main.js", runtimeId: "three", files: projectFiles, activePath, saved, workspaceId, workspaceName });
+      void putDraft({ id: "current", projectId: activeProjectId, name: projectName, entry: "main.js", runtimeId, files: projectFiles, activePath, saved, workspaceId, workspaceName });
       startTime.current = performance.now();
       lastFrame.current = startTime.current;
       frameCount.current = 0;
@@ -990,7 +1076,7 @@ export default function Playground() {
   useEffect(() => {
     if (!draftReadyRef.current) return;
     const timer = window.setTimeout(() => {
-      void putDraft({ id: "current", projectId: activeProjectId, name: projectName, entry: "main.js", runtimeId: "three", files: projectFiles, activePath, saved, workspaceId, workspaceName });
+      void putDraft({ id: "current", projectId: activeProjectId, name: projectName, entry: "main.js", runtimeId, files: projectFiles, activePath, saved, workspaceId, workspaceName });
     }, 250);
     return () => window.clearTimeout(timer);
   }, [activePath, activeProjectId, projectFiles, projectName, saved, workspaceId, workspaceName]);
@@ -1215,7 +1301,7 @@ export default function Playground() {
     const now = new Date().toISOString();
     const id = activeProjectId ?? crypto.randomUUID();
     const project: ProjectRecord = {
-      id, name: projectName.trim() || "Untitled sketch", entry: "main.js", runtimeId: "three", files: projectFiles, updatedAt: now,
+      id, name: projectName.trim() || "Untitled sketch", entry: "main.js", runtimeId, files: projectFiles, updatedAt: now,
     };
     await putProject(project);
     const next = [project, ...library.filter((item) => item.id !== id)];
@@ -1416,7 +1502,7 @@ export default function Playground() {
     });
   };
 
-  const hydrateLocalWorkspace = (body: LocalWorkspaceResponse, selectionKey: string) => {
+  const hydrateLocalWorkspace = (body: LocalWorkspaceResponse, selectionKey: string, stayInProjectBrowser = false) => {
     const nextFiles = localWorkspaceFiles(body);
     const entryFile = nextFiles.find((file) => file.path === "main.js" && file.kind === "text");
     if (!entryFile || entryFile.kind !== "text") throw new Error("Selected folder needs a text main.js file");
@@ -1434,7 +1520,7 @@ export default function Playground() {
     setSelectedProjectKey(selectionKey);
     setUndoFiles(null);
     setSaved(true);
-    setSidebarMode("files");
+    if (!stayInProjectBrowser) setSidebarMode("files");
     runSource(nextFiles);
     setError(null);
   };
@@ -1461,14 +1547,14 @@ export default function Playground() {
     }
   };
 
-  const loadKnownWorkspace = async (knownWorkspaceId: string) => {
+  const loadKnownWorkspace = async (knownWorkspaceId: string, stayInProjectBrowser = false) => {
     try {
       const response = await fetch(`${CODEX_BRIDGE}/workspaces/${knownWorkspaceId}`, {
         headers: companionToken ? { "X-JSLIFE-Companion-Token": companionToken } : undefined,
       });
       const body = await response.json() as LocalWorkspaceResponse & { error?: string };
       if (!response.ok) throw new Error(body.error || `Desktop service returned ${response.status}`);
-      hydrateLocalWorkspace(body, `known:${knownWorkspaceId}`);
+      hydrateLocalWorkspace(body, `known:${knownWorkspaceId}`, stayInProjectBrowser);
     } catch (caught) {
       setError(`Could not open local project: ${caught instanceof Error ? caught.message : "Desktop service is unavailable"}`);
     }
@@ -1510,7 +1596,7 @@ export default function Playground() {
         id: backupId,
         name: projectName.trim() || "Untitled sketch",
         entry: "main.js",
-        runtimeId: "three",
+        runtimeId,
         files: projectFiles,
         updatedAt: now,
       };
@@ -1582,7 +1668,7 @@ export default function Playground() {
       return;
     }
     if (key.startsWith("known:")) {
-      void loadKnownWorkspace(key.slice("known:".length));
+      void loadKnownWorkspace(key.slice("known:".length), true);
       return;
     }
     if (key === "starter:blank") {
@@ -1872,7 +1958,7 @@ export default function Playground() {
 
   const exportProject = async () => {
     const project: ProjectRecord = {
-      id: activeProjectId ?? crypto.randomUUID(), name: projectName, entry: "main.js", runtimeId: "three", files: projectFiles, updatedAt: new Date().toISOString(),
+      id: activeProjectId ?? crypto.randomUUID(), name: projectName, entry: "main.js", runtimeId, files: projectFiles, updatedAt: new Date().toISOString(),
     };
     download(`${safeName(projectName)}.jslife`, await packProject(project));
   };
@@ -2276,7 +2362,7 @@ export default function Playground() {
 
       <section className="projectbar">
         <div className="project-title"><div><input value={projectName} onChange={(event) => { setProjectName(event.target.value); if (!workspaceId) setSaved(false); }} aria-label="Project name" /><span>{workspaceId ? `Local folder · ${workspaceName}` : "Three.js · JavaScript module"}</span></div></div>
-        <div className="engine-status"><i /> THREE.JS <b>r185</b></div>
+        <div className="engine-status"><i /> {runtimeId === "p5" ? "P5.JS" : "THREE.JS"} <b>{runtimeId === "p5" ? "2" : "r185"}</b></div>
         <div className="project-meta"><span>{fps} FPS</span><span>{resolution.width} × {resolution.height}</span><button onClick={() => stageRef.current?.requestFullscreen?.()} aria-label="Enter fullscreen">⛶</button></div>
       </section>
 
@@ -2357,18 +2443,32 @@ export default function Playground() {
                   <div className="project-tree-root-node">
                     <button className="project-tree-root project-tree-root-readonly" onClick={() => toggleProjectGroup("starters")}><span>{collapsedProjectGroups.has("starters") ? "▸" : "▾"}</span><i>▱</i><strong>Starters</strong><small>{PRESETS.length + 1}</small></button>
                     {!collapsedProjectGroups.has("starters") && <div className="project-tree-children">
-                      {renderExplorerProject("starter:blank", "Blank Three.js", "Minimal Three.js scene", { blank: true })}
-                      {PRESETS.map((preset, index) => !preset.category && renderExplorerProject(`starter:${index}`, preset.name, preset.detail ?? "Three.js starter", { accent: preset.accent }))}
-                      {STARTER_CATEGORIES.map((category) => {
-                        const items = PRESETS.map((preset, index) => ({ preset, index })).filter(({ preset }) => preset.category === category);
-                        if (!items.length) return null;
-                        const collapseKey = `starter-category:${category}`;
-                        const collapsed = collapsedProjectGroups.has(collapseKey);
-                        return <div className="project-tree-folder-node" key={category}>
-                          <button className="project-tree-folder" style={{ paddingLeft: 22 }} onClick={() => toggleProjectGroup(collapseKey)}>
-                            <span>{collapsed ? "▸" : "▾"}</span><i>▱</i><strong>{category}</strong><small>{items.length}</small>
+                      {STARTER_RUNTIMES.map(({ runtime, categories }) => {
+                        const runtimeCollapseKey = `starter-runtime:${runtime}`;
+                        const runtimeCollapsed = collapsedProjectGroups.has(runtimeCollapseKey);
+                        const indexed = PRESETS.map((preset, index) => ({ preset, index })).filter(({ preset }) => preset.runtime === runtime);
+                        const ungrouped = indexed.filter(({ preset }) => !preset.category);
+                        const itemCount = indexed.length + (runtime === "three" ? 1 : 0);
+                        return <div className="project-tree-folder-node" key={runtime}>
+                          <button className="project-tree-folder" style={{ paddingLeft: 22 }} onClick={() => toggleProjectGroup(runtimeCollapseKey)}>
+                            <span>{runtimeCollapsed ? "▸" : "▾"}</span><i>▱</i><strong>{RUNTIME_LABELS[runtime]}</strong><small>{itemCount}</small>
                           </button>
-                          {!collapsed && items.map(({ preset, index }) => renderExplorerProject(`starter:${index}`, preset.name, preset.detail ?? "Three.js starter", { accent: preset.accent, indent: 49 }))}
+                          {!runtimeCollapsed && <>
+                            {runtime === "three" && renderExplorerProject("starter:blank", "Blank Three.js", "Minimal Three.js scene", { blank: true, indent: 35 })}
+                            {ungrouped.map(({ preset, index }) => renderExplorerProject(`starter:${index}`, preset.name, preset.detail ?? `Starter · ${RUNTIME_LABELS[runtime]}`, { accent: preset.accent, indent: 35 }))}
+                            {categories.map((category) => {
+                              const items = indexed.filter(({ preset }) => preset.category === category);
+                              if (!items.length) return null;
+                              const collapseKey = `starter-category:${runtime}:${category}`;
+                              const collapsed = collapsedProjectGroups.has(collapseKey);
+                              return <div className="project-tree-folder-node" key={category}>
+                                <button className="project-tree-folder" style={{ paddingLeft: 35 }} onClick={() => toggleProjectGroup(collapseKey)}>
+                                  <span>{collapsed ? "▸" : "▾"}</span><i>▱</i><strong>{category}</strong><small>{items.length}</small>
+                                </button>
+                                {!collapsed && items.map(({ preset, index }) => renderExplorerProject(`starter:${index}`, preset.name, preset.detail ?? `Starter · ${RUNTIME_LABELS[runtime]}`, { accent: preset.accent, indent: 49 }))}
+                              </div>;
+                            })}
+                          </>}
                         </div>;
                       })}
                     </div>}
