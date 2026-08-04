@@ -1,6 +1,6 @@
 import { createServer } from "node:http";
 import { mkdirSync } from "node:fs";
-import { lstat, mkdir, readFile, readdir, realpath, rm, unlink, writeFile } from "node:fs/promises";
+import { cp, lstat, mkdir, readFile, readdir, realpath, rm, unlink, writeFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -75,8 +75,11 @@ const outputSchema = {
         additionalProperties: false,
       },
     },
+    critique: { type: "string" },
+    satisfied: { type: "boolean" },
+    reviewProposal: { type: "boolean" },
   },
-  required: ["message", "action", "changes"],
+  required: ["message", "action", "changes", "critique", "satisfied", "reviewProposal"],
   additionalProperties: false,
 };
 
@@ -236,11 +239,46 @@ async function moveToWorkspace(payload) {
   return readWorkspace(workspaceId);
 }
 
+async function duplicateWorkspace(workspaceId) {
+  const root = workspaceFor(workspaceId);
+  const record = workspaceRegistry[workspaceId];
+  const name = typeof record === "object" && typeof record?.name === "string" ? record.name : basename(root);
+  const parent = dirname(root);
+  const base = basename(root);
+  let candidate = join(parent, `${base} copy`);
+  let suffix = 2;
+  while (await lstat(candidate).then(() => true, () => false)) {
+    candidate = join(parent, `${base} copy ${suffix}`);
+    suffix += 1;
+  }
+  await cp(root, candidate, { recursive: true });
+  const newWorkspaceId = randomUUID();
+  workspaceRegistry[newWorkspaceId] = { root: candidate, name: `${name} copy` };
+  await writeFile(WORKSPACE_REGISTRY, JSON.stringify(workspaceRegistry, null, 2), { mode: 0o600 });
+  return readWorkspace(newWorkspaceId);
+}
+
+async function forgetWorkspace(workspaceId) {
+  if (!workspaceRegistry[workspaceId]) throw new Error("Unknown local workspace");
+  delete workspaceRegistry[workspaceId];
+  await writeFile(WORKSPACE_REGISTRY, JSON.stringify(workspaceRegistry, null, 2), { mode: 0o600 });
+  return { workspaceId };
+}
+
 async function syncWorkspace(workspaceId, payload) {
   const root = workspaceFor(workspaceId);
   const rootRealPath = await realpath(root);
   const changedFiles = Array.isArray(payload.files) ? payload.files : [];
   const removedPaths = Array.isArray(payload.removedPaths) ? payload.removedPaths : [];
+  const nextName = typeof payload.name === "string" ? payload.name.trim() : "";
+  if (nextName) {
+    const record = workspaceRegistry[workspaceId];
+    const currentName = typeof record === "object" && typeof record?.name === "string" ? record.name : basename(root);
+    if (nextName !== currentName) {
+      workspaceRegistry[workspaceId] = { root, name: nextName };
+      await writeFile(WORKSPACE_REGISTRY, JSON.stringify(workspaceRegistry, null, 2), { mode: 0o600 });
+    }
+  }
   for (const file of changedFiles) {
     const target = safeWorkspacePath(root, file.path);
     await mkdir(dirname(target), { recursive: true });
@@ -280,7 +318,38 @@ async function materializeProjectFiles(files, code) {
     : { path: file.path, kind: "asset", mimeType: file.mimeType, size: file.size }) };
 }
 
-function buildPrompt({ message, manifest, error, projectName, previewImage }) {
+function truncate(text, max = 80) {
+  if (!text) return "";
+  const oneLine = text.replace(/\s+/g, " ").trim();
+  return oneLine.length > max ? `${oneLine.slice(0, max - 1)}…` : oneLine;
+}
+
+function describeItem(item) {
+  switch (item.type) {
+    case "reasoning":
+      return item.text ? truncate(item.text, 140) : null;
+    case "command_execution":
+      return item.command ? `$ ${truncate(item.command, 100)}` : null;
+    case "file_change":
+      if (!item.changes?.length) return null;
+      return `✎ ${item.changes.map((change) => `${change.kind === "delete" ? "-" : change.kind === "add" ? "+" : "~"}${change.path}`).join(", ")}`;
+    case "mcp_tool_call":
+      return item.tool ? `Using ${item.tool}…` : null;
+    case "web_search":
+      return item.query ? `Searching "${truncate(item.query, 60)}"…` : "Searching the web…";
+    case "todo_list": {
+      if (!item.items?.length) return null;
+      const done = item.items.filter((entry) => entry.completed).length;
+      return `Plan: ${done}/${item.items.length} steps done`;
+    }
+    case "error":
+      return item.message ? `⚠ ${truncate(item.message, 100)}` : null;
+    default:
+      return null;
+  }
+}
+
+function buildPrompt({ message, manifest, error, projectName, previewImage, evalLoop }) {
   return `You are the local AI pair programmer inside JSLIFE, a browser-based Three.js live-coding studio.
 
 Reply in the same language as the user. Be concise and specific.
@@ -321,6 +390,14 @@ Before returning changes, lint the complete proposed project mentally: verify Ja
 Otherwise return action "none" and changes as an empty array.
 
 If answering well genuinely requires seeing the current render (a visual bug, a look/feel judgment, "why does this look wrong") and no screenshot is attached this turn, return action "need_image" with changes as an empty array and a short message noting you're checking the preview. You will be sent the current canvas screenshot in a follow-up turn of this same conversation; answer normally once it arrives. Do not request an image for questions answerable from code alone, and never request one when a screenshot is already attached this turn.
+
+Always include "critique", "satisfied", and "reviewProposal" in every response.
+
+Self-review loop: whenever action is "changes", decide whether this proposal deserves a self-review before it reaches the user, and set "reviewProposal" accordingly. Default is false, and false is the common case — treat true as the exception, not the norm (set critique to "" and satisfied to true when not reviewing):
+- This is a creative-coding app, so nearly every request touches visuals in some way — that alone is NOT a reason to review. Adding an effect, changing a color, tweaking motion or timing, building an ordinary scene, or any routine creative-coding request is false, even though it's visual work.
+- Set reviewProposal: true only when the request itself explicitly signals it wants extra polish or scrutiny: phrases like "make this look amazing/impressive/gallery-quality/beautiful", an explicit ask to critique, iterate, or refine, or an unusually ambitious multi-file piece where nailing the composition/color/motion is clearly the entire point of the request.
+- Leave reviewProposal: false for everything else, including mechanical or unambiguous changes where reading the diff is enough to know it's correct: renames, refactors, obvious bug fixes, config/wiring changes, and small or quick tweaks ("さっと直して", "quick fix").
+When reviewProposal is true, the app renders your proposal exactly as written and sends you a screenshot of that exact result in an automatic follow-up turn labeled with a round number, capped at ${evalLoop?.maxRounds ?? 3} round(s) maximum (a hard safety ceiling, not a target) — no code change of your own required to trigger it. Decide how many rounds you actually need from the conversation: if the user's phrasing implies extra scrutiny (e.g. an explicit count like "critique it twice", or "make this gallery-quality"), use more of the ceiling; for a merely competent result, one look is enough. When you receive a round follow-up: judge the screenshot against composition (focal point, balance, negative space), color (harmony, contrast, avoids muddy or flat regions), motion (legible, has rhythm, not chaotic), and technical polish (no clipping, banding, popping, or dead frames). If it already clears the bar implied by the request, set satisfied: true and return the SAME code unchanged — stop early rather than spending rounds you don't need. Otherwise revise the code to address what you saw, explain the specific change in "critique", and set satisfied: false. The final round (whether the ceiling or your own judgment) must set satisfied: true regardless. Never request "need_image" yourself during a review round; the screenshot arrives automatically.
 
 Project: ${projectName || "Untitled sketch"}
 Runtime error: ${error || "none"}
@@ -428,6 +505,26 @@ const server = createServer(async (request, response) => {
     return;
   }
 
+  const workspaceDuplicateMatch = request.url?.match(/^\/workspaces\/([a-f0-9-]+)\/duplicate$/i);
+  if (request.method === "POST" && workspaceDuplicateMatch) {
+    try {
+      writeJson(response, 200, await duplicateWorkspace(workspaceDuplicateMatch[1]), origin);
+    } catch (error) {
+      writeJson(response, 400, { error: error instanceof Error ? error.message : "Could not duplicate project folder" }, origin);
+    }
+    return;
+  }
+
+  const workspaceForgetMatch = request.url?.match(/^\/workspaces\/([a-f0-9-]+)\/forget$/i);
+  if (request.method === "POST" && workspaceForgetMatch) {
+    try {
+      writeJson(response, 200, await forgetWorkspace(workspaceForgetMatch[1]), origin);
+    } catch (error) {
+      writeJson(response, 400, { error: error instanceof Error ? error.message : "Could not remove project from JSLIFE" }, origin);
+    }
+    return;
+  }
+
   const workspaceMatch = request.url?.match(/^\/workspaces\/([a-f0-9-]+)$/i);
   if (request.method === "GET" && workspaceMatch) {
     try {
@@ -478,11 +575,17 @@ const server = createServer(async (request, response) => {
     let previewPath = null;
     let scratchRoot = null;
     let waitedSeconds = 0;
+    let lastStatusText = "Codex is reading the project files";
+    const announce = (text) => {
+      if (!text) return;
+      lastStatusText = text;
+      if (!response.destroyed && !response.writableEnded) sendEvent(response, { type: "status", text });
+    };
     const timeout = setTimeout(() => controller.abort(new Error("Codex response timed out after 180 seconds")), 180_000);
     const heartbeat = setInterval(() => {
       waitedSeconds += 15;
       if (!response.destroyed && !response.writableEnded) {
-        sendEvent(response, { type: "status", text: `Codex is still working (${waitedSeconds}s)` });
+        sendEvent(response, { type: "status", text: `${lastStatusText} (${waitedSeconds}s)` });
       }
     }, 15_000);
     try {
@@ -493,10 +596,14 @@ const server = createServer(async (request, response) => {
         : codex.startThread({ ...baseThreadOptions, workingDirectory: root });
 
       previewPath = await savePreview(payload.previewImage);
-      sendEvent(response, { type: "status", text: previewPath ? "Codex is viewing the preview and project files" : "Codex is reading the project files" });
+      announce(previewPath ? "Codex is viewing the preview and project files" : "Codex is reading the project files");
+      // Follow-up turns within the same thread already have the full instructions and
+      // manifest from the turn that started them; resending the whole prompt is redundant.
+      const isLightweightFollowUp = Boolean(payload.followUp && payload.threadId);
+      const promptText = isLightweightFollowUp ? payload.message : buildPrompt({ ...payload, manifest });
       const input = previewPath
-        ? [{ type: "text", text: buildPrompt({ ...payload, manifest }) }, { type: "local_image", path: previewPath }]
-        : buildPrompt({ ...payload, manifest });
+        ? [{ type: "text", text: promptText }, { type: "local_image", path: previewPath }]
+        : promptText;
       const { events } = await thread.runStreamed(input, {
         outputSchema,
         signal: controller.signal,
@@ -505,13 +612,15 @@ const server = createServer(async (request, response) => {
       for await (const event of events) {
         if (event.type === "thread.started") {
           sendEvent(response, { type: "thread", threadId: event.thread_id });
-        } else if (event.type === "item.completed" && event.item.type === "reasoning") {
-          sendEvent(response, { type: "status", text: event.item.text || "Codex is working" });
         } else if (event.type === "item.completed" && event.item.type === "agent_message") {
           const result = JSON.parse(event.item.text);
           sendEvent(response, { type: "result", result });
         } else if (event.type === "turn.failed") {
           throw new Error(event.error.message);
+        } else if (event.type === "turn.completed") {
+          sendEvent(response, { type: "usage", usage: event.usage });
+        } else if (event.type === "item.started" || event.type === "item.updated" || event.type === "item.completed") {
+          announce(describeItem(event.item));
         }
       }
     } finally {

@@ -13,7 +13,17 @@ type StudioPreferences = { chatOpen?: boolean; autoRun?: boolean; editorOpen?: b
 type ProjectBrowserRow = { path: string; name: string; depth: number; kind: "folder" | "file"; file?: ProjectFile };
 type FileAction = StoredChatFileAction;
 type ChatMessage = StoredChatMessage;
-type CodexResult = { message: string; action: "none" | "changes" | "need_image"; changes: FileAction[] };
+type CodexResult = { message: string; action: "none" | "changes" | "need_image"; changes: FileAction[]; critique?: string; satisfied?: boolean; reviewProposal?: boolean };
+type TurnUsage = { input_tokens: number; cached_input_tokens: number; cache_write_input_tokens: number; output_tokens: number; reasoning_output_tokens: number };
+const emptyUsage = (): TurnUsage => ({ input_tokens: 0, cached_input_tokens: 0, cache_write_input_tokens: 0, output_tokens: 0, reasoning_output_tokens: 0 });
+const addUsage = (total: TurnUsage, next: TurnUsage | null | undefined): TurnUsage => next ? {
+  input_tokens: total.input_tokens + next.input_tokens,
+  cached_input_tokens: total.cached_input_tokens + next.cached_input_tokens,
+  cache_write_input_tokens: total.cache_write_input_tokens + next.cache_write_input_tokens,
+  output_tokens: total.output_tokens + next.output_tokens,
+  reasoning_output_tokens: total.reasoning_output_tokens + next.reasoning_output_tokens,
+} : total;
+const formatTokens = (count: number): string => count >= 1000 ? `${(count / 1000).toFixed(1)}k` : String(count);
 type LocalWorkspaceFile = { path: string; kind: "text"; mimeType: string; content: string } | { path: string; kind: "asset"; mimeType: string; base64: string };
 type LocalWorkspaceResponse = { workspaceId: string; name: string; folderName?: string; files: LocalWorkspaceFile[] };
 type ProjectGroup = { id: string; name: string; root: "browser" | "local"; parentId: string | null };
@@ -29,6 +39,7 @@ const STORAGE_PREFERENCES = "jslife-preferences-v1";
 const STORAGE_PROJECT_GROUPS = "jslife-project-groups-v1";
 const STORAGE_LOCAL_WORKSPACE_GROUPS = "jslife-local-workspace-groups-v1";
 const CODEX_BRIDGE = "http://127.0.0.1:4317";
+const EVAL_LOOP_MAX_ROUNDS = 3;
 const APP_MODE = import.meta.env.VITE_JSLIFE_MODE || "local";
 const IS_STATIC_SHOWCASE = APP_MODE === "pages";
 const REPOSITORY_URL = "https://github.com/Narumian/JSLife";
@@ -751,6 +762,7 @@ export default function Playground() {
   const [localWorkspaceGroups, setLocalWorkspaceGroups] = useState<Record<string, string>>(initialLocalWorkspaceGroups);
   const draggedProjectRef = useRef<{ root: "browser"; id: string } | { root: "local"; workspaceId: string } | null>(null);
   const [projectTreeMenu, setProjectTreeMenu] = useState<{ x: number; y: number; root: "browser" | "local"; parentId: string | null } | null>(null);
+  const [projectItemMenu, setProjectItemMenu] = useState<{ x: number; y: number; key: string } | null>(null);
   const [codeSearchOpen, setCodeSearchOpen] = useState(false);
   const [codeSearchQuery, setCodeSearchQuery] = useState("");
   const [codeSearchIndex, setCodeSearchIndex] = useState(0);
@@ -810,6 +822,7 @@ export default function Playground() {
   const preferencesReadyRef = useRef(false);
   const conversationsReadyRef = useRef(false);
   const codeRef = useRef(code);
+  const userEditRef = useRef(false);
   const autoRunRef = useRef(autoRun);
   const chatAbortRef = useRef<AbortController | null>(null);
 
@@ -822,17 +835,16 @@ export default function Playground() {
     [activeProjectId, library, workspaceId],
   );
   const showWorkspaceInExplorer = Boolean(workspaceId || selectedProjectKey === "workspace");
-  const visibleKnownWorkspaces = useMemo(
-    () => knownWorkspaces.filter((entry) => entry.workspaceId !== workspaceId),
-    [knownWorkspaces, workspaceId],
-  );
+  const workspaceEntryDisplay = (entry: KnownWorkspace) => entry.workspaceId === workspaceId
+    ? { name: projectName, detail: `${projectFiles.length} files · ${workspaceName ?? entry.folderName}` }
+    : { name: entry.name, detail: entry.exists ? entry.folderName : "Folder not found" };
   const projectSelectionKeys = useMemo(() => [
-    ...(showWorkspaceInExplorer ? ["workspace"] : []),
+    ...(showWorkspaceInExplorer && !workspaceId ? ["workspace"] : []),
     ...visibleLibrary.map((project) => `saved:${project.id}`),
-    ...visibleKnownWorkspaces.map((entry) => `known:${entry.workspaceId}`),
+    ...knownWorkspaces.map((entry) => `known:${entry.workspaceId}`),
     "starter:blank",
     ...PRESETS.map((_preset, index) => `starter:${index}`),
-  ], [showWorkspaceInExplorer, visibleLibrary, visibleKnownWorkspaces]);
+  ], [knownWorkspaces, showWorkspaceInExplorer, visibleLibrary, workspaceId]);
   const selectedProject = useMemo(() => {
     if (selectedProjectKey.startsWith("saved:")) {
       const project = library.find((candidate) => `saved:${candidate.id}` === selectedProjectKey);
@@ -1091,7 +1103,8 @@ export default function Playground() {
         const currentPaths = new Set(projectFiles.map((file) => file.path));
         const changed = projectFiles.filter((file) => !sameProjectFile(previousByPath.get(file.path), file));
         const removedPaths = previous.filter((file) => !currentPaths.has(file.path)).map((file) => file.path);
-        if (!changed.length && !removedPaths.length) return;
+        const nameChanged = workspaceName !== null && projectName !== workspaceName;
+        if (!changed.length && !removedPaths.length && !nameChanged) return;
         try {
           const serialized = await serializeWorkspaceFiles(changed);
           const response = await fetch(`${CODEX_BRIDGE}/workspaces/${workspaceId}/sync`, {
@@ -1100,7 +1113,7 @@ export default function Playground() {
               "Content-Type": "application/json",
               ...(companionToken ? { "X-JSLIFE-Companion-Token": companionToken } : {}),
             },
-            body: JSON.stringify({ files: serialized, removedPaths }),
+            body: JSON.stringify({ files: serialized, removedPaths, name: projectName }),
           });
           if (!response.ok) {
             const body = await response.json().catch(() => ({})) as { error?: string };
@@ -1108,6 +1121,7 @@ export default function Playground() {
           }
           if (cancelled) return;
           workspaceFilesRef.current = projectFiles;
+          if (nameChanged) setWorkspaceName(projectName);
           setSaved(true);
         } catch (caught) {
           if (!cancelled) setError(`Local save failed: ${caught instanceof Error ? caught.message : "Desktop service is unavailable"}`);
@@ -1115,7 +1129,7 @@ export default function Playground() {
       })();
     }, 350);
     return () => { cancelled = true; window.clearTimeout(timer); };
-  }, [companionToken, projectFiles, workspaceId]);
+  }, [companionToken, projectFiles, projectName, workspaceId, workspaceName]);
 
   useEffect(() => {
     if (!draftReadyRef.current || !workspaceId || hydratedWorkspaceRef.current === workspaceId) return;
@@ -1251,8 +1265,8 @@ export default function Playground() {
   }, [chatMessages, chatBusy, chatOpen]);
 
   useEffect(() => {
-    if (!autoRun) return;
-    const timer = window.setTimeout(runCode, 700);
+    if (!autoRun || !userEditRef.current) return;
+    const timer = window.setTimeout(() => { userEditRef.current = false; runCode(); }, 700);
     return () => window.clearTimeout(timer);
   }, [autoRun, code, runCode]);
 
@@ -1309,6 +1323,20 @@ export default function Playground() {
     setActiveProjectId(id);
     setSelectedProjectKey(`saved:${id}`);
     setSaved(true);
+  };
+
+  const duplicateProject = async (projectId: string) => {
+    const source = library.find((project) => project.id === projectId);
+    if (!source) return;
+    const duplicate: ProjectRecord = { ...source, id: crypto.randomUUID(), name: `${source.name} copy`, updatedAt: new Date().toISOString() };
+    await putProject(duplicate);
+    setLibrary((current) => [duplicate, ...current]);
+  };
+
+  const deleteProject = (projectId: string) => {
+    void removeProject(projectId);
+    setLibrary((current) => current.filter((item) => item.id !== projectId));
+    if (selectedProjectKey === `saved:${projectId}`) selectExplorerProject("workspace");
   };
 
   const loadProject = (project: ProjectRecord, stayInProjectBrowser = false) => {
@@ -1540,7 +1568,7 @@ export default function Playground() {
         if (response.status === 409) return;
         throw new Error(body.error || `Desktop service returned ${response.status}`);
       }
-      hydrateLocalWorkspace(body, "workspace");
+      hydrateLocalWorkspace(body, `known:${body.workspaceId}`);
       void refreshKnownWorkspaces();
     } catch (caught) {
       setError(`Could not open local folder: ${caught instanceof Error ? caught.message : "Desktop service is unavailable"}`);
@@ -1548,6 +1576,10 @@ export default function Playground() {
   };
 
   const loadKnownWorkspace = async (knownWorkspaceId: string, stayInProjectBrowser = false) => {
+    if (knownWorkspaceId === workspaceId) {
+      if (!stayInProjectBrowser) setSidebarMode("files");
+      return;
+    }
     try {
       const response = await fetch(`${CODEX_BRIDGE}/workspaces/${knownWorkspaceId}`, {
         headers: companionToken ? { "X-JSLIFE-Companion-Token": companionToken } : undefined,
@@ -1557,6 +1589,44 @@ export default function Playground() {
       hydrateLocalWorkspace(body, `known:${knownWorkspaceId}`, stayInProjectBrowser);
     } catch (caught) {
       setError(`Could not open local project: ${caught instanceof Error ? caught.message : "Desktop service is unavailable"}`);
+    }
+  };
+
+  const duplicateLocalWorkspace = async (targetWorkspaceId: string) => {
+    try {
+      const response = await fetch(`${CODEX_BRIDGE}/workspaces/${targetWorkspaceId}/duplicate`, {
+        method: "POST",
+        headers: companionToken ? { "X-JSLIFE-Companion-Token": companionToken } : undefined,
+      });
+      const body = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(body.error || `Desktop service returned ${response.status}`);
+      void refreshKnownWorkspaces();
+    } catch (caught) {
+      setError(`Could not duplicate project folder: ${caught instanceof Error ? caught.message : "Desktop service is unavailable"}`);
+    }
+  };
+
+  const forgetLocalWorkspace = async (targetWorkspaceId: string) => {
+    try {
+      const response = await fetch(`${CODEX_BRIDGE}/workspaces/${targetWorkspaceId}/forget`, {
+        method: "POST",
+        headers: companionToken ? { "X-JSLIFE-Companion-Token": companionToken } : undefined,
+      });
+      if (!response.ok) {
+        const body = await response.json() as { error?: string };
+        throw new Error(body.error || `Desktop service returned ${response.status}`);
+      }
+      setLocalWorkspaceGroups((current) => { const next = { ...current }; delete next[targetWorkspaceId]; return next; });
+      if (workspaceId === targetWorkspaceId) {
+        setWorkspaceId(null);
+        setWorkspaceName(null);
+        workspaceFilesRef.current = [];
+        hydratedWorkspaceRef.current = null;
+        selectExplorerProject("workspace");
+      }
+      void refreshKnownWorkspaces();
+    } catch (caught) {
+      setError(`Could not remove project: ${caught instanceof Error ? caught.message : "Desktop service is unavailable"}`);
     }
   };
 
@@ -1612,7 +1682,7 @@ export default function Playground() {
       setOpenPaths(["main.js"]);
       setCode(entryFile.content);
       setActiveProjectId(backupId);
-      setSelectedProjectKey("workspace");
+      setSelectedProjectKey(`known:${body.workspaceId}`);
       setUndoFiles(null);
       setSaved(true);
       setSidebarMode("files");
@@ -1642,8 +1712,8 @@ export default function Playground() {
   };
 
   useEffect(() => {
-    if (!fileBrowserMenu && !projectTreeMenu) return;
-    const closeMenu = () => { setFileBrowserMenu(null); setProjectTreeMenu(null); };
+    if (!fileBrowserMenu && !projectTreeMenu && !projectItemMenu) return;
+    const closeMenu = () => { setFileBrowserMenu(null); setProjectTreeMenu(null); setProjectItemMenu(null); };
     const closeOnEscape = (event: KeyboardEvent) => { if (event.key === "Escape") closeMenu(); };
     window.addEventListener("pointerdown", closeMenu);
     window.addEventListener("keydown", closeOnEscape);
@@ -1651,7 +1721,7 @@ export default function Playground() {
       window.removeEventListener("pointerdown", closeMenu);
       window.removeEventListener("keydown", closeOnEscape);
     };
-  }, [fileBrowserMenu, projectTreeMenu]);
+  }, [fileBrowserMenu, projectTreeMenu, projectItemMenu]);
 
   const openProjectBrowser = () => {
     setSidebarMode("library");
@@ -1882,7 +1952,7 @@ export default function Playground() {
       const collapsed = collapsedProjectGroups.has(collapseKey);
       const nestedGroupCount = projectGroups.filter((candidate) => candidate.parentId === group.id).length;
       const groupProjects = root === "browser" ? visibleLibrary.filter((project) => project.groupId === group.id) : [];
-      const groupWorkspaces = root === "local" ? visibleKnownWorkspaces.filter((entry) => localWorkspaceGroups[entry.workspaceId] === group.id) : [];
+      const groupWorkspaces = root === "local" ? knownWorkspaces.filter((entry) => localWorkspaceGroups[entry.workspaceId] === group.id) : [];
       const itemCount = nestedGroupCount + groupProjects.length + groupWorkspaces.length;
       return <div className="project-tree-folder-node" key={group.id}>
         <button
@@ -1899,16 +1969,19 @@ export default function Playground() {
             loaded: project.id === activeProjectId,
             package: true,
             draggable: true,
+            duplicable: true,
             indent: 9 + (depth + 1) * 13 + 14,
             onDragStart: handleProjectDragStart("browser", project.id),
-            onDelete: () => { void removeProject(project.id); setLibrary((current) => current.filter((item) => item.id !== project.id)); if (selectedProjectKey === key) selectExplorerProject("workspace"); },
+            onDelete: () => deleteProject(project.id),
           }); })}
-          {groupWorkspaces.map((entry) => renderExplorerProject(`known:${entry.workspaceId}`, entry.name, entry.exists ? entry.folderName : "Folder not found", {
+          {groupWorkspaces.map((entry) => { const display = workspaceEntryDisplay(entry); return renderExplorerProject(`known:${entry.workspaceId}`, display.name, display.detail, {
             package: true,
+            loaded: entry.workspaceId === workspaceId,
             draggable: true,
+            duplicable: true,
             indent: 9 + (depth + 1) * 13 + 14,
             onDragStart: handleProjectDragStart("local", entry.workspaceId),
-          }))}
+          }); })}
         </>}
       </div>;
     });
@@ -1917,18 +1990,23 @@ export default function Playground() {
     key: string,
     name: string,
     detail: string,
-    options?: { accent?: string; blank?: boolean; loaded?: boolean; package?: boolean; onDelete?: () => void; draggable?: boolean; onDragStart?: (event: React.DragEvent) => void; indent?: number },
+    options?: { accent?: string; blank?: boolean; loaded?: boolean; package?: boolean; onDelete?: () => void; duplicable?: boolean; draggable?: boolean; onDragStart?: (event: React.DragEvent) => void; indent?: number },
   ) => {
     return <div
       className={`project-explorer-entry${selectedProjectKey === key ? " project-explorer-selected" : ""}${options?.loaded ? " project-explorer-loaded" : ""}`}
       key={key}
       draggable={options?.draggable}
       onDragStart={options?.onDragStart}
+      onContextMenu={options?.duplicable ? (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        setProjectItemMenu({ x: event.clientX, y: event.clientY, key });
+      } : undefined}
     >
       <div className="project-explorer-project">
         <button id={`project-${key.replace(/[^a-z0-9_-]/gi, "-")}`} role="option" aria-selected={selectedProjectKey === key} className="project-explorer-select" style={options?.indent !== undefined ? { paddingLeft: options.indent } : undefined} onClick={() => selectExplorerProject(key)} onDoubleClick={() => activateProjectSelection(key)}>
           <i className={options?.blank ? "project-explorer-blank" : options?.package ? "project-explorer-package" : ""} style={{ "--swatch": options?.accent ?? "var(--purple)" } as React.CSSProperties}>{options?.blank ? "＋" : options?.package ? "J" : "▱"}</i>
-          <span><strong>{name}{options?.package && !name.endsWith(".jslife") ? ".jslife" : ""}</strong><small>{detail}</small></span>
+          <span><strong>{name}{options?.package && !name.endsWith(".jslife") ? ".jslife" : ""}{options?.loaded && <em className="project-explorer-active-badge">ACTIVE</em>}</strong><small>{detail}</small></span>
         </button>
         {options?.onDelete && <button className="project-explorer-delete" onClick={options.onDelete} aria-label={`Delete ${name}`} title="Delete">×</button>}
       </div>
@@ -2091,7 +2169,7 @@ export default function Playground() {
     setChatMessages((current) => [...current, message]);
   };
 
-  const applyFileChanges = (changes: FileAction[], baseFiles = projectFiles): string | null => {
+  const buildNextFiles = (changes: FileAction[], baseFiles: ProjectFile[]): ProjectFile[] => {
     let next = [...baseFiles];
     for (const change of changes) {
       const path = normalizedProjectPath(change.path);
@@ -2112,6 +2190,25 @@ export default function Playground() {
       const index = next.findIndex((file) => file.path === path);
       if (index === -1) next.push(replacement); else next[index] = replacement;
     }
+    return next;
+  };
+
+  // Dry-run check: compiles and renders one frame of the proposal, then restores baseFiles.
+  // Used to decide whether a proposal needs an automatic fix round-trip before it reaches the user.
+  const validateChanges = (changes: FileAction[], baseFiles: ProjectFile[]): string | null => {
+    const next = buildNextFiles(changes, baseFiles);
+    try {
+      validateProject(next, "main.js");
+    } catch (caught) {
+      return caught instanceof Error ? caught.message : "Project validation failed";
+    }
+    const runtimeError = runSource(next);
+    runSource(baseFiles);
+    return runtimeError;
+  };
+
+  const applyFileChanges = (changes: FileAction[], baseFiles = projectFiles): string | null => {
+    const next = buildNextFiles(changes, baseFiles);
     try {
       validateProject(next, "main.js");
     } catch (caught) {
@@ -2146,10 +2243,10 @@ export default function Playground() {
   };
 
   const postChatTurn = async (
-    payload: { message: string; previewImage: string | null; threadId: string | null },
+    payload: { message: string; previewImage: string | null; threadId: string | null; followUp?: boolean },
     signal: AbortSignal,
     onConnected: () => void,
-  ): Promise<{ threadId: string | null; result: CodexResult | null }> => {
+  ): Promise<{ threadId: string | null; result: CodexResult | null; usage: TurnUsage | null }> => {
     const response = await fetch(`${CODEX_BRIDGE}/chat`, {
       method: "POST",
       headers: {
@@ -2159,6 +2256,7 @@ export default function Playground() {
       signal,
       body: JSON.stringify({
         message: payload.message,
+        followUp: payload.followUp ?? false,
         code,
         files: projectFiles.map((file) => file.kind === "text"
           ? { path: file.path, kind: file.kind, mimeType: file.mimeType, content: file.content }
@@ -2167,6 +2265,7 @@ export default function Playground() {
         projectName,
         threadId: payload.threadId,
         previewImage: payload.previewImage,
+        evalLoop: { maxRounds: EVAL_LOOP_MAX_ROUNDS },
       }),
     });
     onConnected();
@@ -2183,6 +2282,7 @@ export default function Playground() {
     let buffer = "";
     let threadId: string | null = null;
     let result: CodexResult | null = null;
+    let usage: TurnUsage | null = null;
     const handleEvent = (block: string) => {
       const data = block.split("\n").filter((line) => line.startsWith("data:"))
         .map((line) => line.slice(5).trim()).join("\n");
@@ -2193,10 +2293,12 @@ export default function Playground() {
         threadId?: string;
         message?: string;
         result?: CodexResult;
+        usage?: TurnUsage;
       };
       if (event.type === "status" && event.text) setChatProgress(event.text);
       if (event.type === "thread" && event.threadId) threadId = event.threadId;
       if (event.type === "result" && event.result) result = event.result;
+      if (event.type === "usage" && event.usage) usage = event.usage;
       if (event.type === "error") throw new Error(event.message || "Codex request failed");
     };
 
@@ -2209,7 +2311,7 @@ export default function Playground() {
       if (done) break;
     }
     if (buffer.trim()) handleEvent(buffer);
-    return { threadId, result };
+    return { threadId, result, usage };
   };
 
   const sendChat = async () => {
@@ -2230,36 +2332,112 @@ export default function Playground() {
 
     try {
       let threadId = codexThreadId;
+      let totalUsage = emptyUsage();
+      let turnCount = 0;
       const first = await postChatTurn({ message: requestText, previewImage, threadId }, controller.signal, markConnected);
       if (first.threadId) { threadId = first.threadId; setCodexThreadId(threadId); }
+      totalUsage = addUsage(totalUsage, first.usage);
+      turnCount++;
       let result = first.result;
 
       if (result?.action === "need_image") {
         setChatProgress(result.message || "プレビューを確認しています…");
         const followupImage = capturePreview();
         const followup = await postChatTurn(
-          { message: `[system] The requested canvas screenshot is attached below. Continue answering the original request: ${requestText}`, previewImage: followupImage, threadId },
+          { message: `[system] The requested canvas screenshot is attached below. Continue answering the original request: ${requestText}`, previewImage: followupImage, threadId, followUp: true },
           controller.signal,
           markConnected,
         );
         if (followup.threadId) { threadId = followup.threadId; setCodexThreadId(threadId); }
+        totalUsage = addUsage(totalUsage, followup.usage);
+        turnCount++;
         result = followup.result;
       }
 
       if (result) {
-        const proposal = result.action === "changes" ? result.changes : undefined;
+        let proposal = result.action === "changes" ? result.changes : undefined;
+        let finalMessage = result.message;
+        let wantsReview = result.action === "changes" && Boolean(result.reviewProposal);
+        let dryError = proposal?.length ? validateChanges(proposal, projectFiles) : null;
+
+        const MAX_FIX_ATTEMPTS = 2;
+        for (let attempt = 1; proposal?.length && dryError && attempt <= MAX_FIX_ATTEMPTS; attempt++) {
+          setChatProgress(`検証エラーを自動修正中… (${attempt}/${MAX_FIX_ATTEMPTS})`);
+          const fix = await postChatTurn(
+            {
+              message: `[system] The previous proposed changes failed validation with this error: ${dryError}\nFix the code and return the corrected, complete file changes. Original request: ${requestText}`,
+              previewImage: null,
+              threadId,
+              followUp: true,
+            },
+            controller.signal,
+            markConnected,
+          );
+          if (fix.threadId) { threadId = fix.threadId; setCodexThreadId(threadId); }
+          totalUsage = addUsage(totalUsage, fix.usage);
+          turnCount++;
+          if (fix.result?.action !== "changes" || !fix.result.changes?.length) {
+            if (fix.result?.message) finalMessage = fix.result.message;
+            break;
+          }
+          proposal = fix.result.changes;
+          finalMessage = fix.result.message;
+          wantsReview = Boolean(fix.result.reviewProposal);
+          dryError = validateChanges(proposal, projectFiles);
+        }
+
+        const critiques: string[] = [];
+        const maxRounds = EVAL_LOOP_MAX_ROUNDS;
+        if (wantsReview && proposal?.length && !dryError) {
+          for (let round = 1; round <= maxRounds; round++) {
+            const renderError = runSource(buildNextFiles(proposal, projectFiles));
+            if (renderError) break;
+            setChatProgress(`批評ラウンド ${round}/${maxRounds}…`);
+            const screenshot = capturePreview();
+            const evalTurn = await postChatTurn(
+              { message: `[system] Round ${round}/${maxRounds}: here is a screenshot of your own proposed result, rendered exactly as written.`, previewImage: screenshot, threadId, followUp: true },
+              controller.signal,
+              markConnected,
+            );
+            if (evalTurn.threadId) { threadId = evalTurn.threadId; setCodexThreadId(threadId); }
+            totalUsage = addUsage(totalUsage, evalTurn.usage);
+            turnCount++;
+            const evalResult = evalTurn.result;
+            if (!evalResult) break;
+            if (evalResult.critique) critiques.push(`Round ${round}: ${evalResult.critique}`);
+            if (evalResult.action !== "changes" || !evalResult.changes?.length) break;
+            const candidateError = validateChanges(evalResult.changes, projectFiles);
+            if (candidateError) {
+              critiques.push(`Round ${round}: revision introduced an error and was discarded (${candidateError})`);
+              break;
+            }
+            proposal = evalResult.changes;
+            finalMessage = evalResult.message || finalMessage;
+            if (evalResult.satisfied) break;
+          }
+          runSource(projectFiles);
+        }
+
         const messageId = crypto.randomUUID();
         const shouldAutoApply = Boolean(proposal?.length && autoRunRef.current && codeRef.current === code);
-        const validationError = proposal?.length && shouldAutoApply ? applyFileChanges(proposal, projectFiles) : null;
+        const validationError = proposal?.length ? (shouldAutoApply ? applyFileChanges(proposal, projectFiles) : dryError) : null;
         const autoApplied = shouldAutoApply && validationError === null;
         appendChat({
           id: messageId,
           role: "assistant",
-          text: result.message,
+          text: finalMessage,
           changes: proposal,
           autoApplied,
           applied: autoApplied,
           validationError: validationError || undefined,
+          critiques: critiques.length ? critiques : undefined,
+          usage: {
+            inputTokens: totalUsage.input_tokens,
+            cachedInputTokens: totalUsage.cached_input_tokens,
+            outputTokens: totalUsage.output_tokens,
+            reasoningOutputTokens: totalUsage.reasoning_output_tokens,
+            turns: turnCount,
+          },
         });
       }
     } catch (caught) {
@@ -2422,22 +2600,24 @@ export default function Playground() {
                         loaded: project.id === activeProjectId,
                         package: true,
                         draggable: true,
+                        duplicable: true,
                         onDragStart: handleProjectDragStart("browser", project.id),
-                        onDelete: () => { void removeProject(project.id); setLibrary((current) => current.filter((item) => item.id !== project.id)); if (selectedProjectKey === key) selectExplorerProject("workspace"); },
+                        onDelete: () => deleteProject(project.id),
                       }); })}
                     </div>}
                   </div>
                   <div className="project-tree-root-node">
-                    <button className="project-tree-root" onClick={() => toggleProjectGroup("local")} onContextMenu={(event) => openProjectGroupMenu(event, "local", null)} onDragOver={handleGroupDragOver("local")} onDrop={handleGroupDrop("local", null)}><span>{collapsedProjectGroups.has("local") ? "▸" : "▾"}</span><i>▱</i><strong>Local</strong><small>{(workspaceId ? 1 : 0) + visibleKnownWorkspaces.length}</small></button>
+                    <button className="project-tree-root" onClick={() => toggleProjectGroup("local")} onContextMenu={(event) => openProjectGroupMenu(event, "local", null)} onDragOver={handleGroupDragOver("local")} onDrop={handleGroupDrop("local", null)}><span>{collapsedProjectGroups.has("local") ? "▸" : "▾"}</span><i>▱</i><strong>Local</strong><small>{knownWorkspaces.length}</small></button>
                     {!collapsedProjectGroups.has("local") && <div className="project-tree-children">
                       {renderProjectGroupFolders("local", null)}
-                      {workspaceId && renderExplorerProject("workspace", projectName, `${projectFiles.length} files · ${workspaceName}`, { loaded: true })}
-                      {!workspaceId && !visibleKnownWorkspaces.filter((entry) => !localWorkspaceGroups[entry.workspaceId]).length && <p className="project-browser-empty">No local project is open.</p>}
-                      {visibleKnownWorkspaces.filter((entry) => !localWorkspaceGroups[entry.workspaceId]).map((entry) => renderExplorerProject(`known:${entry.workspaceId}`, entry.name, entry.exists ? entry.folderName : "Folder not found", {
+                      {!knownWorkspaces.filter((entry) => !localWorkspaceGroups[entry.workspaceId]).length && <p className="project-browser-empty">No local project is open.</p>}
+                      {knownWorkspaces.filter((entry) => !localWorkspaceGroups[entry.workspaceId]).map((entry) => { const display = workspaceEntryDisplay(entry); return renderExplorerProject(`known:${entry.workspaceId}`, display.name, display.detail, {
                         package: true,
+                        loaded: entry.workspaceId === workspaceId,
                         draggable: true,
+                        duplicable: true,
                         onDragStart: handleProjectDragStart("local", entry.workspaceId),
-                      }))}
+                      }); })}
                     </div>}
                   </div>
                   <div className="project-tree-root-node">
@@ -2531,7 +2711,7 @@ export default function Playground() {
                 <textarea
                   ref={editorRef}
                   value={code}
-                  onChange={(event) => { setCode(event.target.value); setSaved(false); }}
+                  onChange={(event) => { userEditRef.current = true; setCode(event.target.value); setSaved(false); }}
                   onKeyDown={(event) => {
                     if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "f") { event.preventDefault(); openCodeSearch(); }
                     if ((event.metaKey || event.ctrlKey) && event.key === "Enter") { event.preventDefault(); runCode(); }
@@ -2541,6 +2721,7 @@ export default function Playground() {
                       const target = event.currentTarget;
                       const next = `${code.slice(0, target.selectionStart)}  ${code.slice(target.selectionEnd)}`;
                       const caret = target.selectionStart + 2;
+                      userEditRef.current = true;
                       setCode(next); setSaved(false);
                       requestAnimationFrame(() => target.setSelectionRange(caret, caret));
                     }
@@ -2626,10 +2807,16 @@ export default function Playground() {
             {chatMessages.map((message) => <article key={message.id} className={`chat-message ${message.role}`}>
               <small>{message.role === "user" ? "YOU" : "CODEX"}</small>
               <p>{message.text}</p>
+              {message.critiques?.length && <div className="eval-critiques">
+                {message.critiques.map((critique, index) => <div key={index}>{critique}</div>)}
+              </div>}
               {message.changes?.length && <div className="code-proposal">
                 <div><span>{message.changes.length} file changes</span><small>{message.changes.map((change) => change.type === "delete" ? `− ${change.path}` : change.type === "move" ? `↳ ${change.path} → ${change.to}` : `+ ${change.path}`).join(" · ")}</small></div>
                 {message.validationError ? <div className="lint-failed">✕ Lintで停止 · {message.validationError}</div> : message.autoApplied ? <div className="auto-applied">✓ Lint通過 · Auto-runで適用済み</div> : message.applied ? <div className="auto-applied">✓ Lint通過 · 適用済み</div> : <div className="lint-ready">Lintは適用時に実行されます</div>}
                 <button onClick={() => applyChatChanges(message.id, message.changes!)} disabled={Boolean(message.validationError)}>{message.applied ? "この変更を再適用" : "変更を適用"}</button>
+              </div>}
+              {message.usage && (message.usage.inputTokens > 0 || message.usage.outputTokens > 0) && <div className="token-usage">
+                🪙 {formatTokens(message.usage.inputTokens)} in{message.usage.cachedInputTokens > 0 ? ` (${formatTokens(message.usage.cachedInputTokens)} cached)` : ""} · {formatTokens(message.usage.outputTokens)} out · {message.usage.turns}ターン
               </div>}
             </article>)}
             {chatBusy && <div className="chat-thinking"><i /><span>{chatProgress || "Codexが考えています…"}</span><button onClick={() => chatAbortRef.current?.abort()}>停止</button></div>}
@@ -2676,6 +2863,16 @@ export default function Playground() {
         <button onClick={addProjectGroup}>Add Group</button>
         {projectTreeMenu.parentId && <button onClick={handleRenameGroupClick}>Rename</button>}
         {projectTreeMenu.parentId && <button onClick={handleDeleteGroupClick}>Delete</button>}
+      </div>}
+      {projectItemMenu && <div className="file-browser-context-menu project-tree-context-menu" style={{ left: projectItemMenu.x, top: projectItemMenu.y }} onPointerDown={(event) => event.stopPropagation()}>
+        {projectItemMenu.key.startsWith("saved:") && <>
+          <button onClick={() => { const id = projectItemMenu.key.slice("saved:".length); setProjectItemMenu(null); void duplicateProject(id); }}>Duplicate</button>
+          <button onClick={() => { const id = projectItemMenu.key.slice("saved:".length); setProjectItemMenu(null); deleteProject(id); }}>Delete</button>
+        </>}
+        {projectItemMenu.key.startsWith("known:") && <>
+          <button onClick={() => { const id = projectItemMenu.key.slice("known:".length); setProjectItemMenu(null); void duplicateLocalWorkspace(id); }}>Duplicate</button>
+          <button onClick={() => { const id = projectItemMenu.key.slice("known:".length); setProjectItemMenu(null); void forgetLocalWorkspace(id); }}>Remove from JSLIFE</button>
+        </>}
       </div>}
 
       {promptModal && <div className="confirm-overlay" onClick={() => setPromptModal(null)}>
