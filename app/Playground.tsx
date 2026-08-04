@@ -1142,6 +1142,12 @@ export default function Playground() {
   }, [companionToken, projectFiles, projectName, workspaceId, workspaceName]);
 
   useEffect(() => {
+    if (!draftReadyRef.current || workspaceId || !activeProjectId || saved) return;
+    const timer = window.setTimeout(() => { void saveProject(); }, 800);
+    return () => window.clearTimeout(timer);
+  }, [activeProjectId, projectFiles, projectName, saved, workspaceId]);
+
+  useEffect(() => {
     if (!draftReadyRef.current || !workspaceId || hydratedWorkspaceRef.current === workspaceId) return;
     hydratedWorkspaceRef.current = workspaceId;
     let cancelled = false;
@@ -2588,7 +2594,7 @@ export default function Playground() {
           <span className={`save-state ${saved ? "saved" : ""}`}><i />{workspaceId ? saved ? "Saved to folder" : "Saving to folder…" : saved ? "Saved in library" : "Unsaved changes"}</span>
           <button className="text-button" onClick={() => importRef.current?.click()}>Import</button>
           <button className="text-button" onClick={() => void exportProject()}>Export .jslife</button>
-          <button className="save-button" onClick={() => void saveProject()} disabled={Boolean(workspaceId)}>{workspaceId ? "Auto Save" : "Save"}</button>
+          <button className="save-button" onClick={() => void saveProject()} disabled={Boolean(workspaceId || activeProjectId)}>{workspaceId || activeProjectId ? "Auto Save" : "Save"}</button>
           <button className="ai-button" onClick={() => setChatOpen((open) => !open)}><Icon>✦</Icon> {IS_STATIC_SHOWCASE && chatOnline !== true ? "Get App" : "Codex"}</button>
           <button className="run-button" onClick={runCode}><Icon>▶</Icon> Run</button>
         </div>
