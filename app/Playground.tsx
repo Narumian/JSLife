@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { packProject, unpackProject } from "./jslife-package";
 import { compileProject, disposeScene, validateProject, type GraphicsRuntime, type PointerState, type ResizeArgs } from "./project-runtime";
-import { getDraft, listChatConversations, listProjects, putChatConversation, putDraft, putProject, removeProject, type ChatConversationRecord, type ProjectFile, type ProjectRecord, type StoredChatFileAction, type StoredChatMessage } from "./project-store";
+import { getDraft, listChatConversations, listProjects, putChatConversation, putDraft, putProject, removeProject, type ChatConversationRecord, type ProjectFile, type ProjectRecord, type StoredChatFileAction, type StoredChatMessage, type TextProjectFile } from "./project-store";
 
 type Preset = { name: string; accent: string; code: string; runtime: "three" | "p5"; category?: string; detail?: string };
 const RUNTIME_LABELS: Record<"three" | "p5", string> = { three: "Three.js", p5: "p5.js" };
@@ -24,6 +24,14 @@ const addUsage = (total: TurnUsage, next: TurnUsage | null | undefined): TurnUsa
   reasoning_output_tokens: total.reasoning_output_tokens + next.reasoning_output_tokens,
 } : total;
 const formatTokens = (count: number): string => count >= 1000 ? `${(count / 1000).toFixed(1)}k` : String(count);
+const formatDuration = (totalSeconds: number): string => {
+  const h = Math.floor(totalSeconds / 3600);
+  const m = Math.floor((totalSeconds % 3600) / 60);
+  const s = totalSeconds % 60;
+  const ss = String(s).padStart(2, "0");
+  if (h > 0) return `${h}:${String(m).padStart(2, "0")}:${ss}`;
+  return `${m}:${ss}`;
+};
 type LocalWorkspaceFile = { path: string; kind: "text"; mimeType: string; content: string } | { path: string; kind: "asset"; mimeType: string; base64: string };
 type LocalWorkspaceResponse = { workspaceId: string; name: string; folderName?: string; files: LocalWorkspaceFile[] };
 type ProjectGroup = { id: string; name: string; root: "browser" | "local"; parentId: string | null };
@@ -780,12 +788,13 @@ export default function Playground() {
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
   const [chatHistoryOpen, setChatHistoryOpen] = useState(false);
   const [chatInput, setChatInput] = useState("");
-  const [forceAttachPreview, setForceAttachPreview] = useState(false);
+  const [chatQueue, setChatQueue] = useState<string[]>([]);
   const [chatBusy, setChatBusy] = useState(false);
   const [chatOnline, setChatOnline] = useState<boolean | null>(null);
   const [companionNeedsPairing, setCompanionNeedsPairing] = useState(false);
   const [companionToken] = useState(initialCompanionToken);
   const [chatProgress, setChatProgress] = useState("");
+  const [chatElapsed, setChatElapsed] = useState(0);
   const [codexThreadId, setCodexThreadId] = useState<string | null>(null);
   const [undoFiles, setUndoFiles] = useState<ProjectFile[] | null>(null);
   const [fileBrowserMenu, setFileBrowserMenu] = useState<{ x: number; y: number } | null>(null);
@@ -825,6 +834,7 @@ export default function Playground() {
   const userEditRef = useRef(false);
   const autoRunRef = useRef(autoRun);
   const chatAbortRef = useRef<AbortController | null>(null);
+  const chatRequestIdRef = useRef(0);
 
   const lines = useMemo(() => code.split("\n").length, [code]);
   const projectFiles = useMemo(() => files.map((file) => file.path === activePath && file.kind === "text" ? { ...file, content: code } : file), [activePath, code, files]);
@@ -1263,6 +1273,12 @@ export default function Playground() {
     const timer = window.setTimeout(() => chatEndRef.current?.scrollIntoView({ behavior: "smooth" }), 0);
     return () => window.clearTimeout(timer);
   }, [chatMessages, chatBusy, chatOpen]);
+
+  useEffect(() => {
+    if (!chatBusy) return;
+    const timer = window.setInterval(() => setChatElapsed((value) => value + 1), 1000);
+    return () => window.clearInterval(timer);
+  }, [chatBusy]);
 
   useEffect(() => {
     if (!autoRun || !userEditRef.current) return;
@@ -2243,7 +2259,14 @@ export default function Playground() {
   };
 
   const postChatTurn = async (
-    payload: { message: string; previewImage: string | null; threadId: string | null; followUp?: boolean },
+    payload: {
+      message: string;
+      previewImage: string | null;
+      threadId: string | null;
+      followUp?: boolean;
+      references?: { name: string; files: { path: string; kind: "text"; mimeType: string; content: string }[] }[];
+      referenceWorkspaceIds?: string[];
+    },
     signal: AbortSignal,
     onConnected: () => void,
   ): Promise<{ threadId: string | null; result: CodexResult | null; usage: TurnUsage | null }> => {
@@ -2266,6 +2289,8 @@ export default function Playground() {
         threadId: payload.threadId,
         previewImage: payload.previewImage,
         evalLoop: { maxRounds: EVAL_LOOP_MAX_ROUNDS },
+        references: payload.references,
+        referenceWorkspaceIds: payload.referenceWorkspaceIds,
       }),
     });
     onConnected();
@@ -2314,17 +2339,23 @@ export default function Playground() {
     return { threadId, result, usage };
   };
 
-  const sendChat = async () => {
-    const requestText = chatInput.trim();
-    if (!requestText || chatBusy) return;
+  const sendChat = async (overrideText?: string) => {
+    const requestText = (overrideText ?? chatInput).trim();
+    if (!requestText) return;
+    if (chatBusy) {
+      setChatQueue((queue) => [...queue, requestText]);
+      if (overrideText === undefined) setChatInput("");
+      return;
+    }
+    const requestId = ++chatRequestIdRef.current;
 
     const userMessage: ChatMessage = { id: crypto.randomUUID(), role: "user", text: requestText };
-    const previewImage = forceAttachPreview ? capturePreview() : null;
     appendChat(userMessage);
-    setChatInput("");
-    setForceAttachPreview(false);
+    if (overrideText === undefined) setChatInput("");
     setChatBusy(true);
     setChatProgress("Codexに接続中…");
+    setChatElapsed(0);
+    const startedAt = Date.now();
     const controller = new AbortController();
     chatAbortRef.current = controller;
     let bridgeConnected = false;
@@ -2334,7 +2365,21 @@ export default function Playground() {
       let threadId = codexThreadId;
       let totalUsage = emptyUsage();
       let turnCount = 0;
-      const first = await postChatTurn({ message: requestText, previewImage, threadId }, controller.signal, markConnected);
+      const lowerRequest = requestText.toLowerCase();
+      const mentionedSaved = library.filter((project) => project.id !== activeProjectId && project.name.trim().length >= 2 && lowerRequest.includes(project.name.toLowerCase()));
+      const mentionedLocal = knownWorkspaces.filter((entry) => entry.workspaceId !== workspaceId && entry.name.trim().length >= 2 && lowerRequest.includes(entry.name.toLowerCase()));
+      const references = mentionedSaved.map((project) => ({
+        name: project.name,
+        files: project.files
+          .filter((file): file is TextProjectFile => file.kind === "text")
+          .map((file) => ({ path: file.path, kind: "text" as const, mimeType: file.mimeType, content: file.content })),
+      }));
+      const referenceWorkspaceIds = mentionedLocal.map((entry) => entry.workspaceId);
+      const first = await postChatTurn(
+        { message: requestText, previewImage: null, threadId, references: references.length ? references : undefined, referenceWorkspaceIds: referenceWorkspaceIds.length ? referenceWorkspaceIds : undefined },
+        controller.signal,
+        markConnected,
+      );
       if (first.threadId) { threadId = first.threadId; setCodexThreadId(threadId); }
       totalUsage = addUsage(totalUsage, first.usage);
       turnCount++;
@@ -2437,10 +2482,12 @@ export default function Playground() {
             outputTokens: totalUsage.output_tokens,
             reasoningOutputTokens: totalUsage.reasoning_output_tokens,
             turns: turnCount,
+            elapsedSeconds: Math.round((Date.now() - startedAt) / 1000),
           },
         });
       }
     } catch (caught) {
+      if (requestId !== chatRequestIdRef.current) return;
       if (!bridgeConnected) setChatOnline(false);
       const cancelled = caught instanceof DOMException && caught.name === "AbortError";
       appendChat({
@@ -2451,11 +2498,20 @@ export default function Playground() {
           : `応答を完了できませんでした。${caught instanceof Error ? caught.message : "Codex bridgeを確認してください。"}`,
       });
     } finally {
-      chatAbortRef.current = null;
-      setChatBusy(false);
-      setChatProgress("");
+      if (requestId === chatRequestIdRef.current) {
+        chatAbortRef.current = null;
+        setChatBusy(false);
+        setChatProgress("");
+      }
     }
   };
+
+  useEffect(() => {
+    if (chatBusy || !chatQueue.length) return;
+    const [next, ...rest] = chatQueue;
+    setChatQueue(rest);
+    void sendChat(next);
+  }, [chatBusy, chatQueue]);
 
   const undoSuggestion = () => {
     if (undoFiles === null) return;
@@ -2816,21 +2872,20 @@ export default function Playground() {
                 <button onClick={() => applyChatChanges(message.id, message.changes!)} disabled={Boolean(message.validationError)}>{message.applied ? "この変更を再適用" : "変更を適用"}</button>
               </div>}
               {message.usage && (message.usage.inputTokens > 0 || message.usage.outputTokens > 0) && <div className="token-usage">
-                🪙 {formatTokens(message.usage.inputTokens)} in{message.usage.cachedInputTokens > 0 ? ` (${formatTokens(message.usage.cachedInputTokens)} cached)` : ""} · {formatTokens(message.usage.outputTokens)} out · {message.usage.turns}ターン
+                🪙 {formatTokens(message.usage.inputTokens)} in{message.usage.cachedInputTokens > 0 ? ` (${formatTokens(message.usage.cachedInputTokens)} cached)` : ""} · {formatTokens(message.usage.outputTokens)} out · {message.usage.turns}ターン · {formatDuration(message.usage.elapsedSeconds)}
               </div>}
             </article>)}
-            {chatBusy && <div className="chat-thinking"><i /><span>{chatProgress || "Codexが考えています…"}</span><button onClick={() => chatAbortRef.current?.abort()}>停止</button></div>}
+            {chatBusy && <div className="chat-thinking"><i /><span>{chatProgress || "Codexが考えています…"}</span><b className="chat-elapsed">{formatDuration(chatElapsed)}</b><button onClick={() => { chatAbortRef.current?.abort(); setChatQueue([]); }}>停止</button></div>}
+            {chatQueue.map((text, index) => <article key={`queued-${index}`} className="chat-message user queued">
+              <small>YOU</small>
+              <p>{text}</p>
+              <span className="queued-badge">送信待ち<button onClick={() => setChatQueue((queue) => queue.filter((_, i) => i !== index))} aria-label="キューから削除">×</button></span>
+            </article>)}
             <div ref={chatEndRef} />
           </div>
 
           <div className="chat-composer">
             {undoFiles !== null && <button className="undo-code" onClick={undoSuggestion}>↶ 最後のAI変更を元に戻す</button>}
-            <div className="prompt-chips">
-              <button onClick={() => setChatInput("このコードの構成を簡潔に説明して")}>説明</button>
-              <button onClick={() => setChatInput("現在のエラーを診断して、必要なら修正版を提案して")}>エラー修正</button>
-              <button onClick={() => setChatInput("見た目をもっと印象的にする変更を提案して")}>演出を追加</button>
-              <button className={forceAttachPreview ? "chip-active" : ""} onClick={() => setForceAttachPreview((value) => !value)} aria-pressed={forceAttachPreview} title="次の送信だけ現在の画面のスクリーンショットを添付">画面を送信{forceAttachPreview ? " ✓" : ""}</button>
-            </div>
             <div className="composer-box">
               <textarea
                 value={chatInput}
@@ -2842,12 +2897,12 @@ export default function Playground() {
                     void sendChat();
                   }
                 }}
-                placeholder="プロジェクトのコードやアセットについてCodexに相談…"
+                placeholder={chatBusy ? "送信すると今の応答が終わり次第、自動で送信されます…" : "プロジェクトのコードやアセットについてCodexに相談…"}
                 rows={3}
               />
-              <button onClick={() => void sendChat()} disabled={!chatInput.trim() || chatBusy} aria-label="Send to Codex">↑</button>
+              <button onClick={() => void sendChat()} disabled={!chatInput.trim()} aria-label={chatBusy ? "Queue message for after the current response" : "Send to Codex"} title={chatBusy ? "現在の応答後に自動送信" : undefined}>{chatBusy ? "⏳" : "↑"}</button>
             </div>
-            <small className="chat-privacy">テキストファイル、アセット一覧をローカルCodexへ送信 · プレビュー画像は「画面を送信」を選ぶか、Codexが必要と判断した場合のみ送信 · バイナリアセット本体は送信しません</small>
+            <small className="chat-privacy">テキストファイル、アセット一覧をローカルCodexへ送信 · プレビュー画像はCodexが必要と判断した場合のみ送信 · バイナリアセット本体は送信しません</small>
           </div>
           </>}
         </aside>

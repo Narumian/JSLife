@@ -54,7 +54,7 @@ export type StoredChatMessage = {
   applied?: boolean;
   validationError?: string;
   critiques?: string[];
-  usage?: { inputTokens: number; cachedInputTokens: number; outputTokens: number; reasoningOutputTokens: number; turns: number };
+  usage?: { inputTokens: number; cachedInputTokens: number; outputTokens: number; reasoningOutputTokens: number; turns: number; elapsedSeconds: number };
 };
 
 export type ChatConversationRecord = {

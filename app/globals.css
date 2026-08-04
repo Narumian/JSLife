@@ -287,6 +287,10 @@ button { color: inherit; }
 .chat-message.user { padding-left: 22px; }
 .chat-message.user > small { text-align: right; }
 .chat-message.user > p { border-color: #413767; border-radius: 8px 2px 8px 8px; background: #211c31; color: #d6cffa; }
+.chat-message.user.queued > p { border-style: dashed; opacity: .6; }
+.queued-badge { display: flex; justify-content: flex-end; align-items: center; gap: 5px; margin-top: 4px; color: #7c74a3; font: 8px var(--font-geist-mono), monospace; letter-spacing: .04em; }
+.queued-badge button { border: 0; background: transparent; color: #7c74a3; cursor: pointer; }
+.queued-badge button:hover { color: #ff8a77; }
 .auto-applied { margin-top: 6px; color: #91aa61; font-size: 8px; letter-spacing: .04em; }
 .lint-ready, .lint-failed { margin: 0 0 8px !important; padding: 6px 7px; border-radius: 2px; font: 8px/1.45 var(--font-geist-mono), monospace; }
 .lint-ready { border: 1px solid #343c3f; background: #101518; color: #77817d; }
@@ -300,14 +304,12 @@ button { color: inherit; }
 .code-proposal button:disabled { border-color: #483533; background: #1a1414; color: #745a55; cursor: not-allowed; }
 .chat-thinking { display: flex; align-items: center; gap: 8px; padding: 8px 4px; color: #837aab; font-size: 9px; }
 .chat-thinking i { width: 7px; height: 7px; border-radius: 50%; background: #9e87ff; animation: codex-pulse .7s infinite alternate; }
-.chat-thinking button { margin-left: auto; border: 0; background: transparent; color: #7c8581; font-size: 8px; cursor: pointer; }
+.chat-thinking span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-elapsed { margin-left: auto; flex: 0 0 auto; color: #9e87ff; font: 9px var(--font-geist-mono), monospace; letter-spacing: .03em; }
+.chat-thinking button { flex: 0 0 auto; border: 0; background: transparent; color: #7c8581; font-size: 8px; cursor: pointer; }
 .chat-thinking button:hover { color: #ff8a77; }
 .chat-composer { padding: 9px 10px 10px; border-top: 1px solid var(--line); background: #101519; }
 .undo-code { width: 100%; margin-bottom: 7px; padding: 5px; border: 1px solid #3b4240; background: transparent; color: #8d9692; font-size: 8px; cursor: pointer; }
-.prompt-chips { margin-bottom: 6px; display: flex; gap: 5px; overflow-x: auto; }
-.prompt-chips button { flex: 0 0 auto; padding: 4px 7px; border: 1px solid #343b3f; border-radius: 10px; background: #161b1f; color: #818a86; font-size: 8px; cursor: pointer; }
-.prompt-chips button:hover { border-color: #665399; color: #c3b6ee; }
-.prompt-chips button.chip-active { border-color: var(--lime); color: var(--lime); background: #1a2016; }
 .composer-box { position: relative; border: 1px solid #3c4246; border-radius: 4px; background: #0c1013; }
 .composer-box:focus-within { border-color: #6955a0; box-shadow: 0 0 0 2px #8a5cff12; }
 .composer-box textarea { width: 100%; min-height: 66px; max-height: 150px; padding: 9px 40px 9px 10px; resize: vertical; outline: 0; border: 0; background: transparent; color: #d0d4d1; font-size: 10px; line-height: 1.45; }
