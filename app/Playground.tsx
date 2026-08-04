@@ -9,7 +9,7 @@ type Preset = { name: string; accent: string; code: string; runtime: "three" | "
 const RUNTIME_LABELS: Record<"three" | "p5", string> = { three: "Three.js", p5: "p5.js" };
 type LegacyProject = { id: string; name: string; code: string; updatedAt: string };
 type LegacyDraft = { projectName?: string; code?: string; activeProjectId?: string | null; saved?: boolean };
-type StudioPreferences = { chatOpen?: boolean; autoRun?: boolean; editorOpen?: boolean; openPaths?: string[]; sidebarMode?: "files" | "library" };
+type StudioPreferences = { chatOpen?: boolean; editorOpen?: boolean; openPaths?: string[]; sidebarMode?: "files" | "library" };
 type ProjectBrowserRow = { path: string; name: string; depth: number; kind: "folder" | "file"; file?: ProjectFile };
 type FileAction = StoredChatFileAction;
 type ChatMessage = StoredChatMessage;
@@ -775,7 +775,6 @@ export default function Playground() {
   const [codeSearchQuery, setCodeSearchQuery] = useState("");
   const [codeSearchIndex, setCodeSearchIndex] = useState(0);
   const [running, setRunning] = useState(true);
-  const [autoRun, setAutoRun] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [fps, setFps] = useState(60);
   const [elapsed, setElapsed] = useState(0);
@@ -832,7 +831,7 @@ export default function Playground() {
   const conversationsReadyRef = useRef(false);
   const codeRef = useRef(code);
   const userEditRef = useRef(false);
-  const autoRunRef = useRef(autoRun);
+  const workspaceIdRef = useRef<string | null>(null);
   const chatAbortRef = useRef<AbortController | null>(null);
   const chatRequestIdRef = useRef(0);
 
@@ -880,7 +879,7 @@ export default function Playground() {
   );
 
   useEffect(() => { codeRef.current = code; }, [code]);
-  useEffect(() => { autoRunRef.current = autoRun; }, [autoRun]);
+  useEffect(() => { workspaceIdRef.current = workspaceId; }, [workspaceId]);
   useEffect(() => { chatConversationsRef.current = chatConversations; }, [chatConversations]);
   useEffect(() => { localStorage.setItem(STORAGE_PROJECT_GROUPS, JSON.stringify(projectGroups)); }, [projectGroups]);
   useEffect(() => { localStorage.setItem(STORAGE_LOCAL_WORKSPACE_GROUPS, JSON.stringify(localWorkspaceGroups)); }, [localWorkspaceGroups]);
@@ -1078,7 +1077,6 @@ export default function Playground() {
         const preferences = JSON.parse(localStorage.getItem(STORAGE_PREFERENCES) ?? "{}") as StudioPreferences;
         if (!cancelled) {
           setChatOpen(preferences.chatOpen ?? false);
-          setAutoRun(preferences.autoRun ?? false);
           setEditorOpen(preferences.editorOpen ?? true);
           setSidebarMode(preferences.sidebarMode === "library" ? "library" : "files");
           if (Array.isArray(preferences.openPaths)) {
@@ -1103,43 +1101,46 @@ export default function Playground() {
     return () => window.clearTimeout(timer);
   }, [activePath, activeProjectId, projectFiles, projectName, saved, workspaceId, workspaceName]);
 
+  const pushWorkspaceSync = useCallback(async (targetWorkspaceId: string, nextFiles: ProjectFile[]) => {
+    const previous = workspaceFilesRef.current;
+    const previousByPath = new Map(previous.map((file) => [file.path, file]));
+    const currentPaths = new Set(nextFiles.map((file) => file.path));
+    const changed = nextFiles.filter((file) => !sameProjectFile(previousByPath.get(file.path), file));
+    const removedPaths = previous.filter((file) => !currentPaths.has(file.path)).map((file) => file.path);
+    const nameChanged = workspaceName !== null && projectName !== workspaceName;
+    if (!changed.length && !removedPaths.length && !nameChanged) return;
+    const serialized = await serializeWorkspaceFiles(changed);
+    const response = await fetch(`${CODEX_BRIDGE}/workspaces/${targetWorkspaceId}/sync`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(companionToken ? { "X-JSLIFE-Companion-Token": companionToken } : {}),
+      },
+      body: JSON.stringify({ files: serialized, removedPaths, name: projectName }),
+    });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({})) as { error?: string };
+      throw new Error(body.error || `Desktop service returned ${response.status}`);
+    }
+    workspaceFilesRef.current = nextFiles;
+    if (nameChanged) setWorkspaceName(projectName);
+    setSaved(true);
+  }, [companionToken, projectName, workspaceName]);
+
   useEffect(() => {
     if (!draftReadyRef.current || !workspaceId) return;
     let cancelled = false;
     const timer = window.setTimeout(() => {
-      void (async () => {
-        const previous = workspaceFilesRef.current;
-        const previousByPath = new Map(previous.map((file) => [file.path, file]));
-        const currentPaths = new Set(projectFiles.map((file) => file.path));
-        const changed = projectFiles.filter((file) => !sameProjectFile(previousByPath.get(file.path), file));
-        const removedPaths = previous.filter((file) => !currentPaths.has(file.path)).map((file) => file.path);
-        const nameChanged = workspaceName !== null && projectName !== workspaceName;
-        if (!changed.length && !removedPaths.length && !nameChanged) return;
-        try {
-          const serialized = await serializeWorkspaceFiles(changed);
-          const response = await fetch(`${CODEX_BRIDGE}/workspaces/${workspaceId}/sync`, {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              ...(companionToken ? { "X-JSLIFE-Companion-Token": companionToken } : {}),
-            },
-            body: JSON.stringify({ files: serialized, removedPaths, name: projectName }),
-          });
-          if (!response.ok) {
-            const body = await response.json().catch(() => ({})) as { error?: string };
-            throw new Error(body.error || `Desktop service returned ${response.status}`);
-          }
-          if (cancelled) return;
-          workspaceFilesRef.current = projectFiles;
-          if (nameChanged) setWorkspaceName(projectName);
-          setSaved(true);
-        } catch (caught) {
-          if (!cancelled) setError(`Local save failed: ${caught instanceof Error ? caught.message : "Desktop service is unavailable"}`);
-        }
-      })();
+      // Kept running even while a local-workspace chat turn is in flight: Codex writes
+      // through its own patch-based file tool, so a genuine conflict with a concurrent local
+      // edit fails that write and Codex re-reads and retries, the same way it would against
+      // any other file that changed underneath it.
+      void pushWorkspaceSync(workspaceId, projectFiles).catch((caught) => {
+        if (!cancelled) setError(`Local save failed: ${caught instanceof Error ? caught.message : "Desktop service is unavailable"}`);
+      });
     }, 350);
     return () => { cancelled = true; window.clearTimeout(timer); };
-  }, [companionToken, projectFiles, projectName, workspaceId, workspaceName]);
+  }, [projectFiles, pushWorkspaceSync, workspaceId]);
 
   useEffect(() => {
     if (!draftReadyRef.current || workspaceId || !activeProjectId || saved) return;
@@ -1179,8 +1180,8 @@ export default function Playground() {
 
   useEffect(() => {
     if (!preferencesReadyRef.current) return;
-    localStorage.setItem(STORAGE_PREFERENCES, JSON.stringify({ chatOpen, autoRun, editorOpen, openPaths, sidebarMode }));
-  }, [autoRun, chatOpen, editorOpen, openPaths, sidebarMode]);
+    localStorage.setItem(STORAGE_PREFERENCES, JSON.stringify({ chatOpen, editorOpen, openPaths, sidebarMode }));
+  }, [chatOpen, editorOpen, openPaths, sidebarMode]);
 
   useEffect(() => {
     if (!conversationsReadyRef.current || !activeConversationId) return;
@@ -1287,10 +1288,10 @@ export default function Playground() {
   }, [chatBusy]);
 
   useEffect(() => {
-    if (!autoRun || !userEditRef.current) return;
+    if (!userEditRef.current) return;
     const timer = window.setTimeout(() => { userEditRef.current = false; runCode(); }, 700);
     return () => window.clearTimeout(timer);
-  }, [autoRun, code, runCode]);
+  }, [code, runCode]);
 
   useEffect(() => {
     let raf = 0;
@@ -2229,8 +2230,9 @@ export default function Playground() {
     return runtimeError;
   };
 
-  const applyFileChanges = (changes: FileAction[], baseFiles = projectFiles): string | null => {
-    const next = buildNextFiles(changes, baseFiles);
+  // Shared commit path for both the JSON-changes flow (browser-only projects) and the
+  // direct-write flow (local folders, where `next` was just read back from disk).
+  const commitProjectFiles = (next: ProjectFile[], baseFiles: ProjectFile[], markSaved: boolean): string | null => {
     try {
       validateProject(next, "main.js");
     } catch (caught) {
@@ -2253,9 +2255,12 @@ export default function Playground() {
       setActivePath("main.js");
       if (entryFile?.kind === "text") setCode(entryFile.content);
     }
-    setSaved(false);
+    if (markSaved) { workspaceFilesRef.current = next; setSaved(true); } else setSaved(false);
     return null;
   };
+
+  const applyFileChanges = (changes: FileAction[], baseFiles = projectFiles): string | null =>
+    commitProjectFiles(buildNextFiles(changes, baseFiles), baseFiles, false);
 
   const applyChatChanges = (messageId: string, changes: FileAction[]) => {
     const validationError = applyFileChanges(changes);
@@ -2263,6 +2268,16 @@ export default function Playground() {
       ? { ...message, applied: validationError === null, validationError: validationError || undefined }
       : message));
   };
+
+  const pullWorkspaceFiles = useCallback(async (targetWorkspaceId: string, signal?: AbortSignal): Promise<ProjectFile[]> => {
+    const response = await fetch(`${CODEX_BRIDGE}/workspaces/${targetWorkspaceId}`, {
+      headers: companionToken ? { "X-JSLIFE-Companion-Token": companionToken } : undefined,
+      signal,
+    });
+    if (!response.ok) throw new Error(`Could not read workspace (${response.status})`);
+    const body = await response.json() as LocalWorkspaceResponse;
+    return localWorkspaceFiles(body);
+  }, [companionToken]);
 
   const postChatTurn = async (
     payload: {
@@ -2297,6 +2312,7 @@ export default function Playground() {
         evalLoop: { maxRounds: EVAL_LOOP_MAX_ROUNDS },
         references: payload.references,
         referenceWorkspaceIds: payload.referenceWorkspaceIds,
+        workspaceId,
       }),
     });
     onConnected();
@@ -2368,6 +2384,10 @@ export default function Playground() {
     const markConnected = () => { bridgeConnected = true; };
 
     try {
+      const activeWorkspaceId = workspaceId;
+      const baseFiles = projectFiles;
+      if (activeWorkspaceId) await pushWorkspaceSync(activeWorkspaceId, projectFiles);
+
       let threadId = codexThreadId;
       let totalUsage = emptyUsage();
       let turnCount = 0;
@@ -2405,7 +2425,104 @@ export default function Playground() {
         result = followup.result;
       }
 
-      if (result) {
+      if (result && activeWorkspaceId) {
+        // Local folder: Codex already wrote the files directly, so each checkpoint pulls
+        // the result back from disk instead of applying a "changes" JSON payload.
+        let finalMessage = result.message;
+        let wantsReview = result.action === "changes" && Boolean(result.reviewProposal);
+        let committed: ProjectFile[] | null = null;
+        let commitError: string | null = null;
+        const critiques: string[] = [];
+
+        // Reads back whatever is currently on disk and adopts it as-is. Codex writes through
+        // its own patch-based file tool, so a real conflict with a concurrent local edit (the
+        // browser keeps syncing to disk throughout the turn, not just before/after it) fails
+        // that write on Codex's side and it re-reads and retries — the same recovery it already
+        // does for any file that changed underneath it. Bails out entirely if the user has
+        // switched to a different project altogether, rather than writing into whatever is now
+        // on screen.
+        const pullAndCommit = async (fallbackChanges?: FileAction[]): Promise<string | null> => {
+          if (workspaceIdRef.current !== activeWorkspaceId) return null;
+          let pulled = await pullWorkspaceFiles(activeWorkspaceId, controller.signal);
+          if (workspaceIdRef.current !== activeWorkspaceId) return null;
+          // Defensive: the prompt tells Codex to write files directly and leave "changes"
+          // empty, but apply anything it returned there anyway in case it didn't.
+          if (fallbackChanges?.length) pulled = buildNextFiles(fallbackChanges, pulled);
+          const err = commitProjectFiles(pulled, baseFiles, true);
+          if (!err) committed = pulled;
+          return err;
+        };
+
+        if (result.action === "changes" || result.changes?.length) commitError = await pullAndCommit(result.changes);
+
+        const MAX_FIX_ATTEMPTS = 2;
+        for (let attempt = 1; commitError && attempt <= MAX_FIX_ATTEMPTS; attempt++) {
+          setChatProgress(`検証エラーを自動修正中… (${attempt}/${MAX_FIX_ATTEMPTS})`);
+          const fix = await postChatTurn(
+            {
+              message: `[system] Your last file write failed validation with this error: ${commitError}\nFix the files directly in your working directory. Original request: ${requestText}`,
+              previewImage: null,
+              threadId,
+              followUp: true,
+            },
+            controller.signal,
+            markConnected,
+          );
+          if (fix.threadId) { threadId = fix.threadId; setCodexThreadId(threadId); }
+          totalUsage = addUsage(totalUsage, fix.usage);
+          turnCount++;
+          if (fix.result?.message) finalMessage = fix.result.message;
+          if (fix.result?.action !== "changes") { commitError = null; break; }
+          wantsReview = Boolean(fix.result.reviewProposal);
+          commitError = await pullAndCommit(fix.result.changes);
+        }
+
+        const maxRounds = EVAL_LOOP_MAX_ROUNDS;
+        if (wantsReview && !commitError && committed) {
+          for (let round = 1; round <= maxRounds; round++) {
+            setChatProgress(`批評ラウンド ${round}/${maxRounds}…`);
+            const screenshot = capturePreview();
+            const evalTurn = await postChatTurn(
+              { message: `[system] Round ${round}/${maxRounds}: here is a screenshot of your own result, rendered exactly as written.`, previewImage: screenshot, threadId, followUp: true },
+              controller.signal,
+              markConnected,
+            );
+            if (evalTurn.threadId) { threadId = evalTurn.threadId; setCodexThreadId(threadId); }
+            totalUsage = addUsage(totalUsage, evalTurn.usage);
+            turnCount++;
+            const evalResult = evalTurn.result;
+            if (!evalResult) break;
+            if (evalResult.critique) critiques.push(`Round ${round}: ${evalResult.critique}`);
+            if (evalResult.action === "changes") {
+              const roundError = await pullAndCommit(evalResult.changes);
+              if (roundError) {
+                critiques.push(`Round ${round}: revision introduced an error and was discarded (${roundError})`);
+                break;
+              }
+            }
+            finalMessage = evalResult.message || finalMessage;
+            if (evalResult.satisfied) break;
+          }
+        }
+
+        appendChat({
+          id: crypto.randomUUID(),
+          role: "assistant",
+          text: finalMessage,
+          autoApplied: Boolean(committed),
+          applied: Boolean(committed),
+          validationError: commitError || undefined,
+          critiques: critiques.length ? critiques : undefined,
+          usage: {
+            inputTokens: totalUsage.input_tokens,
+            cachedInputTokens: totalUsage.cached_input_tokens,
+            outputTokens: totalUsage.output_tokens,
+            reasoningOutputTokens: totalUsage.reasoning_output_tokens,
+            turns: turnCount,
+            elapsedSeconds: Math.round((Date.now() - startedAt) / 1000),
+          },
+        });
+      } else if (result) {
         let proposal = result.action === "changes" ? result.changes : undefined;
         let finalMessage = result.message;
         let wantsReview = result.action === "changes" && Boolean(result.reviewProposal);
@@ -2470,7 +2587,7 @@ export default function Playground() {
         }
 
         const messageId = crypto.randomUUID();
-        const shouldAutoApply = Boolean(proposal?.length && autoRunRef.current && codeRef.current === code);
+        const shouldAutoApply = Boolean(proposal?.length && codeRef.current === code);
         const validationError = proposal?.length ? (shouldAutoApply ? applyFileChanges(proposal, projectFiles) : dryError) : null;
         const autoApplied = shouldAutoApply && validationError === null;
         appendChat({
@@ -2819,7 +2936,6 @@ export default function Playground() {
             <button className="play" onClick={toggleRunning} aria-label={running ? "Pause" : "Play"}>{running ? "Ⅱ" : "▶"}</button>
             <div className="timecode">{String(Math.floor(elapsed / 60)).padStart(2, "0")}:{String(Math.floor(elapsed % 60)).padStart(2, "0")}<small>.{String(Math.floor((elapsed % 1) * 100)).padStart(2, "0")}</small></div>
             <div className="timeline"><i style={{ width: `${(elapsed % 10) * 10}%` }} /><span style={{ left: `${(elapsed % 10) * 10}%` }} /></div>
-            <label className="auto-run"><input type="checkbox" checked={autoRun} onChange={(event) => setAutoRun(event.target.checked)} /> Auto-run</label>
           </div>
         </section>
 
@@ -2872,20 +2988,22 @@ export default function Playground() {
               {message.critiques?.length && <div className="eval-critiques">
                 {message.critiques.map((critique, index) => <div key={index}>{critique}</div>)}
               </div>}
-              {message.changes?.length && <div className="code-proposal">
+              {message.changes?.length ? <div className="code-proposal">
                 <div><span>{message.changes.length} file changes</span><small>{message.changes.map((change) => change.type === "delete" ? `− ${change.path}` : change.type === "move" ? `↳ ${change.path} → ${change.to}` : `+ ${change.path}`).join(" · ")}</small></div>
-                {message.validationError ? <div className="lint-failed">✕ Lintで停止 · {message.validationError}</div> : message.autoApplied ? <div className="auto-applied">✓ Lint通過 · Auto-runで適用済み</div> : message.applied ? <div className="auto-applied">✓ Lint通過 · 適用済み</div> : <div className="lint-ready">Lintは適用時に実行されます</div>}
+                {message.validationError ? <div className="lint-failed">✕ Lintで停止 · {message.validationError}</div> : message.autoApplied ? <div className="auto-applied">✓ Lint通過 · 自動適用済み</div> : message.applied ? <div className="auto-applied">✓ Lint通過 · 適用済み</div> : <div className="lint-ready">Lintは適用時に実行されます</div>}
                 <button onClick={() => applyChatChanges(message.id, message.changes!)} disabled={Boolean(message.validationError)}>{message.applied ? "この変更を再適用" : "変更を適用"}</button>
-              </div>}
+              </div> : (message.autoApplied || message.validationError) ? <div className="code-proposal">
+                {message.validationError ? <div className="lint-failed">✕ Lintで停止 · {message.validationError}</div> : <div className="auto-applied">✓ Lint通過 · ファイルを直接保存しました</div>}
+              </div> : null}
               {message.usage && (message.usage.inputTokens > 0 || message.usage.outputTokens > 0) && <div className="token-usage">
                 🪙 {formatTokens(message.usage.inputTokens)} in{message.usage.cachedInputTokens > 0 ? ` (${formatTokens(message.usage.cachedInputTokens)} cached)` : ""} · {formatTokens(message.usage.outputTokens)} out · {message.usage.turns}ターン · {formatDuration(message.usage.elapsedSeconds)}
               </div>}
             </article>)}
             {chatBusy && <div className="chat-thinking"><i /><span>{chatProgress || "Codexが考えています…"}</span><b className="chat-elapsed">{formatDuration(chatElapsed)}</b><button onClick={() => { chatAbortRef.current?.abort(); setChatQueue([]); }}>停止</button></div>}
             {chatQueue.map((text, index) => <article key={`queued-${index}`} className="chat-message user queued">
-              <small>YOU</small>
+              <small>YOU <span className="queued-badge"><i />送信待ち</span></small>
               <p>{text}</p>
-              <span className="queued-badge">送信待ち<button onClick={() => setChatQueue((queue) => queue.filter((_, i) => i !== index))} aria-label="キューから削除">×</button></span>
+              <button className="queued-cancel" onClick={() => setChatQueue((queue) => queue.filter((_, i) => i !== index))}>キャンセル ×</button>
             </article>)}
             <div ref={chatEndRef} />
           </div>

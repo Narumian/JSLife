@@ -232,8 +232,6 @@ button { color: inherit; }
 .timeline { position: relative; height: 2px; flex: 1; background: #303639; }
 .timeline i { display: block; height: 100%; background: var(--lime); }
 .timeline span { position: absolute; width: 7px; height: 7px; border-radius: 50%; top: -2px; transform: translateX(-50%); background: var(--lime); box-shadow: 0 0 8px #c8ff4577; }
-.auto-run { display: flex; align-items: center; gap: 6px; white-space: nowrap; color: #777f7c; font-size: 9px; }
-.auto-run input { accent-color: var(--lime); }
 .eval-critiques { margin-top: 6px; padding: 7px 9px; border-left: 2px solid var(--purple); background: #1a1424; display: flex; flex-direction: column; gap: 4px; color: #b9a8d9; font-size: 9px; line-height: 1.4; }
 .token-usage { margin-top: 5px; color: #535c58; font-size: 8px; letter-spacing: .02em; }
 
@@ -287,10 +285,12 @@ button { color: inherit; }
 .chat-message.user { padding-left: 22px; }
 .chat-message.user > small { text-align: right; }
 .chat-message.user > p { border-color: #413767; border-radius: 8px 2px 8px 8px; background: #211c31; color: #d6cffa; }
-.chat-message.user.queued > p { border-style: dashed; opacity: .6; }
-.queued-badge { display: flex; justify-content: flex-end; align-items: center; gap: 5px; margin-top: 4px; color: #7c74a3; font: 8px var(--font-geist-mono), monospace; letter-spacing: .04em; }
-.queued-badge button { border: 0; background: transparent; color: #7c74a3; cursor: pointer; }
-.queued-badge button:hover { color: #ff8a77; }
+.chat-message.user.queued > small { display: flex; justify-content: flex-end; align-items: center; gap: 6px; }
+.chat-message.user.queued > p { border-color: #6b4f1f; border-style: dashed; background: #211a10; color: #e3c99a; }
+.queued-badge { display: inline-flex; align-items: center; gap: 4px; padding: 1px 7px; border-radius: 20px; background: #40290c; color: #e0a94a; font-size: 7px; letter-spacing: .06em; }
+.queued-badge i { width: 5px; height: 5px; border-radius: 50%; background: #e0a94a; animation: codex-pulse .8s infinite alternate; }
+.queued-cancel { display: block; margin: 5px 0 0 auto; border: 0; background: transparent; color: #7c8581; font-size: 8px; cursor: pointer; }
+.queued-cancel:hover { color: #ff8a77; }
 .auto-applied { margin-top: 6px; color: #91aa61; font-size: 8px; letter-spacing: .04em; }
 .lint-ready, .lint-failed { margin: 0 0 8px !important; padding: 6px 7px; border-radius: 2px; font: 8px/1.45 var(--font-geist-mono), monospace; }
 .lint-ready { border: 1px solid #343c3f; background: #101518; color: #77817d; }
