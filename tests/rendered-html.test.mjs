@@ -47,6 +47,8 @@ test("ships storage, packaging, chat, and all three launch routes", async () => 
   assert.match(playground, /type="file" multiple/);
   assert.match(playground, /conversation\.projectId === activeProjectId/);
   assert.match(playground, /activeChatStorageKey\(activeProjectId\)/);
+  assert.match(playground, /isSavedBrowserProject = Boolean\(activeProjectId && library\.some/);
+  assert.match(playground, /workspaceId \|\| !isSavedBrowserProject \|\| saved/);
   assert.match(playground, /\/workspaces\/open/);
   assert.match(playground, /\/workspaces\/move/);
   assert.match(playground, /Move to Local Files/);

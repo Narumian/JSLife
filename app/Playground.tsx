@@ -843,6 +843,7 @@ export default function Playground() {
     () => library.filter((project) => !(workspaceId && project.id === activeProjectId)),
     [activeProjectId, library, workspaceId],
   );
+  const isSavedBrowserProject = Boolean(activeProjectId && library.some((project) => project.id === activeProjectId));
   const showWorkspaceInExplorer = Boolean(workspaceId || selectedProjectKey === "workspace");
   const workspaceEntryDisplay = (entry: KnownWorkspace) => entry.workspaceId === workspaceId
     ? { name: projectName, detail: `${projectFiles.length} files · ${workspaceName ?? entry.folderName}` }
@@ -1143,10 +1144,10 @@ export default function Playground() {
   }, [projectFiles, pushWorkspaceSync, workspaceId]);
 
   useEffect(() => {
-    if (!draftReadyRef.current || workspaceId || !activeProjectId || saved) return;
+    if (!draftReadyRef.current || workspaceId || !isSavedBrowserProject || saved) return;
     const timer = window.setTimeout(() => { void saveProject(); }, 800);
     return () => window.clearTimeout(timer);
-  }, [activeProjectId, projectFiles, projectName, saved, workspaceId]);
+  }, [isSavedBrowserProject, projectFiles, projectName, saved, workspaceId]);
 
   useEffect(() => {
     if (!draftReadyRef.current || !workspaceId || hydratedWorkspaceRef.current === workspaceId) return;
@@ -2711,7 +2712,7 @@ export default function Playground() {
           <span className={`save-state ${saved ? "saved" : ""}`}><i />{workspaceId ? saved ? "Saved to folder" : "Saving to folder…" : saved ? "Saved in library" : "Unsaved changes"}</span>
           <button className="text-button" onClick={() => importRef.current?.click()}>Import</button>
           <button className="text-button" onClick={() => void exportProject()}>Export .jslife</button>
-          <button className="save-button" onClick={() => void saveProject()} disabled={Boolean(workspaceId || activeProjectId)}>{workspaceId || activeProjectId ? "Auto Save" : "Save"}</button>
+          <button className="save-button" onClick={() => void saveProject()} disabled={Boolean(workspaceId || isSavedBrowserProject)}>{workspaceId || isSavedBrowserProject ? "Auto Save" : "Save"}</button>
           <button className="ai-button" onClick={() => setChatOpen((open) => !open)}><Icon>✦</Icon> {IS_STATIC_SHOWCASE && chatOnline !== true ? "Get App" : "Codex"}</button>
           <button className="run-button" onClick={runCode}><Icon>▶</Icon> Run</button>
         </div>
