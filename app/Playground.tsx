@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { detectLanguage, tokenize } from "./editor-highlight";
 import { packProject, unpackProject } from "./jslife-package";
 import { compileProject, disposeScene, validateProject, type GraphicsRuntime, type PointerState, type ResizeArgs } from "./project-runtime";
 import { getDraft, listChatConversations, listProjects, putChatConversation, putDraft, putProject, removeProject, type ChatConversationRecord, type ProjectFile, type ProjectRecord, type StoredChatFileAction, type StoredChatMessage, type TextProjectFile } from "./project-store";
@@ -787,6 +788,8 @@ export default function Playground() {
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
   const [chatHistoryOpen, setChatHistoryOpen] = useState(false);
   const [chatInput, setChatInput] = useState("");
+  const [chatAttachment, setChatAttachment] = useState<{ dataUrl: string; name: string } | null>(null);
+  const [chatDragActive, setChatDragActive] = useState(false);
   const [chatQueue, setChatQueue] = useState<string[]>([]);
   const [chatBusy, setChatBusy] = useState(false);
   const [chatOnline, setChatOnline] = useState<boolean | null>(null);
@@ -813,6 +816,8 @@ export default function Playground() {
   const importRef = useRef<HTMLInputElement>(null);
   const assetRef = useRef<HTMLInputElement>(null);
   const editorRef = useRef<HTMLTextAreaElement>(null);
+  const editorHighlightRef = useRef<HTMLPreElement>(null);
+  const lineNumbersRef = useRef<HTMLPreElement>(null);
   const codeSearchRef = useRef<HTMLInputElement>(null);
   const pointer = useRef<PointerState>({ x: 0, y: 0, px: 0, py: 0, down: false, pressure: 0, kind: "touch" });
   const activePointer = useRef<{ id: number; kind: PointerState["kind"] } | null>(null);
@@ -836,6 +841,8 @@ export default function Playground() {
   const chatRequestIdRef = useRef(0);
 
   const lines = useMemo(() => code.split("\n").length, [code]);
+  const editorLanguage = useMemo(() => detectLanguage(activePath), [activePath]);
+  const editorTokens = useMemo(() => tokenize(code, editorLanguage), [code, editorLanguage]);
   const projectFiles = useMemo(() => files.map((file) => file.path === activePath && file.kind === "text" ? { ...file, content: code } : file), [activePath, code, files]);
   const runtimeId = useMemo(() => detectRuntime(projectFiles), [projectFiles]);
   const projectBrowserRows = useMemo(() => buildProjectBrowserRows(projectFiles, collapsedFolders), [collapsedFolders, projectFiles]);
@@ -909,7 +916,9 @@ export default function Playground() {
     editor.setSelectionRange(offset, offset + codeSearchQuery.length);
     const line = code.slice(0, offset).split("\n").length - 1;
     editor.scrollTop = Math.max(0, line * 18.7 - editor.clientHeight / 2);
+    syncEditorScroll();
   }, [activeCodeSearchIndex, code, codeSearchMatches, codeSearchQuery]);
+  useEffect(() => { syncEditorScroll(); }, [activePath]);
 
   const teardown = useCallback(() => {
     const runtime = runtimeRef.current;
@@ -1478,6 +1487,16 @@ export default function Playground() {
     setFiles(next);
     setSaved(false);
     event.target.value = "";
+  };
+
+  const syncEditorScroll = () => {
+    const editor = editorRef.current;
+    if (!editor) return;
+    if (editorHighlightRef.current) {
+      editorHighlightRef.current.scrollTop = editor.scrollTop;
+      editorHighlightRef.current.scrollLeft = editor.scrollLeft;
+    }
+    if (lineNumbersRef.current) lineNumbersRef.current.scrollTop = editor.scrollTop;
   };
 
   const openCodeSearch = () => {
@@ -2193,6 +2212,41 @@ export default function Playground() {
     setChatMessages((current) => [...current, message]);
   };
 
+  const readAttachedImage = (file: File): Promise<string | null> => new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onerror = () => resolve(null);
+    reader.onload = () => {
+      const img = new window.Image();
+      img.onerror = () => resolve(null);
+      img.onload = () => {
+        const maxEdge = 1024;
+        const scale = Math.min(1, maxEdge / Math.max(img.width, img.height));
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.max(1, Math.round(img.width * scale));
+        canvas.height = Math.max(1, Math.round(img.height * scale));
+        const context = canvas.getContext("2d");
+        if (!context) { resolve(null); return; }
+        context.drawImage(img, 0, 0, canvas.width, canvas.height);
+        resolve(canvas.toDataURL("image/jpeg", 0.85));
+      };
+      img.src = reader.result as string;
+    };
+    reader.readAsDataURL(file);
+  });
+
+  const attachChatImage = async (file: File) => {
+    if (!file.type.startsWith("image/")) return;
+    const dataUrl = await readAttachedImage(file);
+    if (dataUrl) setChatAttachment({ dataUrl, name: file.name });
+  };
+
+  const handleChatDrop = (event: React.DragEvent) => {
+    event.preventDefault();
+    setChatDragActive(false);
+    const file = [...event.dataTransfer.files].find((candidate) => candidate.type.startsWith("image/"));
+    if (file) void attachChatImage(file);
+  };
+
   const buildNextFiles = (changes: FileAction[], baseFiles: ProjectFile[]): ProjectFile[] => {
     let next = [...baseFiles];
     for (const change of changes) {
@@ -2284,6 +2338,7 @@ export default function Playground() {
     payload: {
       message: string;
       previewImage: string | null;
+      previewImageKind?: "screenshot" | "attachment";
       threadId: string | null;
       followUp?: boolean;
       references?: { name: string; files: { path: string; kind: "text"; mimeType: string; content: string }[] }[];
@@ -2310,6 +2365,7 @@ export default function Playground() {
         projectName,
         threadId: payload.threadId,
         previewImage: payload.previewImage,
+        previewImageKind: payload.previewImageKind ?? "screenshot",
         evalLoop: { maxRounds: EVAL_LOOP_MAX_ROUNDS },
         references: payload.references,
         referenceWorkspaceIds: payload.referenceWorkspaceIds,
@@ -2371,10 +2427,12 @@ export default function Playground() {
       return;
     }
     const requestId = ++chatRequestIdRef.current;
+    const attachment = chatAttachment;
 
-    const userMessage: ChatMessage = { id: crypto.randomUUID(), role: "user", text: requestText };
+    const userMessage: ChatMessage = { id: crypto.randomUUID(), role: "user", text: requestText, imageDataUrl: attachment?.dataUrl };
     appendChat(userMessage);
     if (overrideText === undefined) setChatInput("");
+    setChatAttachment(null);
     setChatBusy(true);
     setChatProgress("Codexに接続中…");
     setChatElapsed(0);
@@ -2403,7 +2461,7 @@ export default function Playground() {
       }));
       const referenceWorkspaceIds = mentionedLocal.map((entry) => entry.workspaceId);
       const first = await postChatTurn(
-        { message: requestText, previewImage: null, threadId, references: references.length ? references : undefined, referenceWorkspaceIds: referenceWorkspaceIds.length ? referenceWorkspaceIds : undefined },
+        { message: requestText, previewImage: attachment?.dataUrl ?? null, previewImageKind: attachment ? "attachment" : "screenshot", threadId, references: references.length ? references : undefined, referenceWorkspaceIds: referenceWorkspaceIds.length ? referenceWorkspaceIds : undefined },
         controller.signal,
         markConnected,
       );
@@ -2887,11 +2945,14 @@ export default function Playground() {
                 <button onClick={closeCodeSearch} aria-label="Close search">×</button>
               </div>}
               <div className="editor-wrap">
-                <pre className="line-numbers" aria-hidden="true">{Array.from({ length: lines }, (_, i) => i + 1).join("\n")}</pre>
-                <textarea
+                <pre className="line-numbers" ref={lineNumbersRef} aria-hidden="true">{Array.from({ length: lines }, (_, i) => i + 1).join("\n")}</pre>
+                <div className="editor-code-area">
+                  <pre className="editor-highlight" ref={editorHighlightRef} aria-hidden="true"><code>{editorTokens.map((token, index) => token.type === "plain" ? token.text : <span key={index} className={`tok-${token.type}`}>{token.text}</span>)}{code.endsWith("\n") ? " " : ""}</code></pre>
+                  <textarea
                   ref={editorRef}
                   value={code}
                   onChange={(event) => { userEditRef.current = true; setCode(event.target.value); setSaved(false); }}
+                  onScroll={syncEditorScroll}
                   onKeyDown={(event) => {
                     if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "f") { event.preventDefault(); openCodeSearch(); }
                     if ((event.metaKey || event.ctrlKey) && event.key === "Enter") { event.preventDefault(); runCode(); }
@@ -2908,7 +2969,8 @@ export default function Playground() {
                   }}
                   spellCheck={false}
                   aria-label={`${activePath} source code`}
-                />
+                  />
+                </div>
               </div>
               <div className="editor-status"><span>{activePath}</span><span>{lines} lines</span><span>UTF-8</span><span className="context-ready">● {projectFiles.length} files ready</span></div>
               </>}
@@ -2985,6 +3047,7 @@ export default function Playground() {
             </div>}
             {chatMessages.map((message) => <article key={message.id} className={`chat-message ${message.role}`}>
               <small>{message.role === "user" ? "YOU" : "CODEX"}</small>
+              {message.imageDataUrl && <img className="chat-attachment-thumb" src={message.imageDataUrl} alt="添付画像" />}
               <p>{message.text}</p>
               {message.critiques?.length && <div className="eval-critiques">
                 {message.critiques.map((critique, index) => <div key={index}>{critique}</div>)}
@@ -3011,7 +3074,17 @@ export default function Playground() {
 
           <div className="chat-composer">
             {undoFiles !== null && <button className="undo-code" onClick={undoSuggestion}>↶ 最後のAI変更を元に戻す</button>}
-            <div className="composer-box">
+            <div
+              className={`composer-box${chatDragActive ? " drag-active" : ""}`}
+              onDragOver={(event) => { event.preventDefault(); setChatDragActive(true); }}
+              onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setChatDragActive(false); }}
+              onDrop={handleChatDrop}
+            >
+              {chatAttachment && <div className="composer-attachment">
+                <img src={chatAttachment.dataUrl} alt={chatAttachment.name} />
+                <span>{chatAttachment.name}</span>
+                <button type="button" onClick={() => setChatAttachment(null)} aria-label="添付画像を削除">×</button>
+              </div>}
               <textarea
                 value={chatInput}
                 onChange={(event) => setChatInput(event.target.value)}
@@ -3022,12 +3095,13 @@ export default function Playground() {
                     void sendChat();
                   }
                 }}
-                placeholder={chatBusy ? "送信すると今の応答が終わり次第、自動で送信されます…" : "プロジェクトのコードやアセットについてCodexに相談…"}
+                placeholder={chatBusy ? "送信すると今の応答が終わり次第、自動で送信されます…" : "プロジェクトのコードやアセットについてCodexに相談… (画像をドラッグ＆ドロップで添付)"}
                 rows={3}
               />
               <button onClick={() => void sendChat()} disabled={!chatInput.trim()} aria-label={chatBusy ? "Queue message for after the current response" : "Send to Codex"} title={chatBusy ? "現在の応答後に自動送信" : undefined}>{chatBusy ? "⏳" : "↑"}</button>
+              {chatDragActive && <div className="composer-drop-overlay">画像をドロップして添付</div>}
             </div>
-            <small className="chat-privacy">テキストファイル、アセット一覧をローカルCodexへ送信 · プレビュー画像はCodexが必要と判断した場合のみ送信 · バイナリアセット本体は送信しません</small>
+            <small className="chat-privacy">テキストファイル、アセット一覧をローカルCodexへ送信 · プレビュー画像は添付時、またはCodexが必要と判断した場合のみ送信 · バイナリアセット本体は送信しません</small>
           </div>
           </>}
         </aside>

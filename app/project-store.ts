@@ -49,6 +49,7 @@ export type StoredChatMessage = {
   id: string;
   role: "user" | "assistant";
   text: string;
+  imageDataUrl?: string;
   changes?: StoredChatFileAction[];
   autoApplied?: boolean;
   applied?: boolean;

@@ -384,7 +384,7 @@ function describeItem(item) {
   }
 }
 
-function buildPrompt({ message, manifest, error, projectName, previewImage, evalLoop, savedReferences, localReferences, directWrite }) {
+function buildPrompt({ message, manifest, error, projectName, previewImage, previewImageKind, evalLoop, savedReferences, localReferences, directWrite }) {
   const hasReferences = Boolean(savedReferences?.length || localReferences?.length);
   return `You are the local AI pair programmer inside JSLIFE, a browser-based Three.js live-coding studio.
 
@@ -454,7 +454,11 @@ When reviewProposal is true, the app renders your proposal exactly as written an
 
 Project: ${projectName || "Untitled sketch"}
 Runtime error: ${error || "none"}
-Visual context: ${previewImage ? "A current graphics preview screenshot is attached. Inspect it directly when answering visual questions." : "No preview screenshot was available."}
+Visual context: ${previewImage
+    ? previewImageKind === "attachment"
+      ? "The user attached a reference image below (not a screenshot of the current canvas — it may be a mockup, photo, or example to draw inspiration from). Inspect it directly and use it as context for the request."
+      : "A current graphics preview screenshot is attached. Inspect it directly when answering visual questions."
+    : "No preview screenshot was available."}
 
 <project_files>
 ${JSON.stringify(manifest)}

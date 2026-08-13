@@ -208,8 +208,30 @@ button { color: inherit; }
 .code-search button:disabled { color: #444c49; cursor: default; }
 .editor-wrap { min-height: 0; flex: 1; display: grid; grid-template-columns: 44px 1fr; background: #11161a; overflow: hidden; }
 .line-numbers { margin: 0; padding: 15px 11px 24px 0; text-align: right; color: #46504e; background: #0f1417; border-right: 1px solid #1d2326; overflow: hidden; user-select: none; font: 11px/1.7 var(--font-geist-mono), monospace; }
-.editor-wrap textarea { width: 100%; height: 100%; resize: none; outline: none; border: 0; padding: 15px 18px 24px; background: transparent; color: #cdd4cf; caret-color: var(--lime); white-space: pre; overflow: auto; tab-size: 2; font: 11px/1.7 var(--font-geist-mono), monospace; }
+.editor-code-area { position: relative; min-width: 0; min-height: 0; overflow: hidden; }
+.editor-highlight, .editor-wrap textarea { position: absolute; inset: 0; margin: 0; padding: 15px 18px 24px; white-space: pre; tab-size: 2; font: 11px/1.7 var(--font-geist-mono), monospace; }
+.editor-highlight { overflow: hidden; color: #cdd4cf; pointer-events: none; }
+.editor-highlight code { white-space: inherit; font: inherit; }
+.editor-wrap textarea { width: 100%; height: 100%; resize: none; outline: none; border: 0; background: transparent; color: transparent; caret-color: var(--lime); overflow: auto; }
 .editor-wrap textarea::selection { background: #8a5cff55; }
+.tok-comment { color: #5b6560; font-style: italic; }
+.tok-string { color: #e3b566; }
+.tok-keyword { color: var(--purple); }
+.tok-number, .tok-boolean { color: #7fd1c9; }
+.tok-function { color: var(--lime); }
+.tok-tag { color: #ff8fa3; }
+.tok-attr-name { color: #9fd88a; }
+.tok-property { color: #7fd1c9; }
+.tok-selector { color: var(--lime); }
+.tok-at-rule { color: var(--purple); }
+.tok-heading { color: var(--lime); font-weight: 700; }
+.tok-bold { color: var(--ink); font-weight: 700; }
+.tok-italic { color: #c1c7c3; font-style: italic; }
+.tok-code { color: #e3b566; }
+.tok-link { color: #7fb2ff; }
+.tok-quote { color: #858e8a; font-style: italic; }
+.tok-list { color: var(--purple); }
+.tok-punctuation { color: #6b7470; }
 .editor-status { display: flex; align-items: center; gap: 14px; padding: 0 12px; height: 25px; flex: 0 0 25px; border-top: 1px solid var(--line); color: #69726f; background: #0d1114; font: 9px var(--font-geist-mono), monospace; }
 .context-ready { margin-left: auto; color: #829a54; }
 
@@ -316,6 +338,15 @@ button { color: inherit; }
 .composer-box textarea::placeholder { color: #535c58; }
 .composer-box > button { position: absolute; right: 7px; bottom: 7px; width: 27px; height: 27px; border: 0; border-radius: 3px; background: var(--purple); color: #fff; font-weight: 800; cursor: pointer; }
 .composer-box > button:disabled { background: #303539; color: #656c69; cursor: default; }
+.composer-box.drag-active { border-color: var(--purple); box-shadow: 0 0 0 2px #8a5cff22; }
+.composer-attachment { display: flex; align-items: center; gap: 6px; padding: 8px 8px 0; }
+.composer-attachment img { width: 34px; height: 34px; object-fit: cover; border-radius: 3px; border: 1px solid #3c4246; }
+.composer-attachment span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #9aa19d; font-size: 9px; }
+.composer-attachment button { flex: 0 0 auto; width: 16px; height: 16px; border: 0; border-radius: 50%; background: #2a3033; color: #c1c7c3; font-size: 10px; line-height: 1; cursor: pointer; }
+.composer-attachment button:hover { background: #3a4144; color: #fff; }
+.composer-drop-overlay { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; border-radius: 4px; background: #0c1013cc; color: #d6cffa; font-size: 10px; font-weight: 600; pointer-events: none; }
+.chat-attachment-thumb { display: block; max-width: 160px; max-height: 160px; margin: 0 0 5px; border-radius: 6px; border: 1px solid #272d31; object-fit: cover; }
+.chat-message.user .chat-attachment-thumb { margin-left: auto; }
 .chat-privacy { display: block; margin-top: 6px; color: #535b58; font-size: 7px; line-height: 1.4; text-align: center; }
 @keyframes codex-pulse { from { opacity: .35; transform: scale(.8); } to { opacity: 1; transform: scale(1.12); } }
 
